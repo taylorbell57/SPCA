@@ -18,6 +18,11 @@ from SPCA.timing_correction import (
 
 get_time = partial(get_time, time_scale="utc")
 
+# Independent instrument reference in seconds; do not import the implementation
+# constant when checking cadence. IRAC HPP, Timing Offsets Between Frames:
+# https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/irachpp/timing/
+REFERENCE_RESET_PHASE_S = 3.231 / 1000
+
 
 def timing_header(n=64, frame=2.0, start=55000.0, channel=1):
     return dict(
@@ -37,18 +42,24 @@ def timing_header(n=64, frame=2.0, start=55000.0, channel=1):
 @pytest.mark.parametrize("channel", range(1, 5))
 @pytest.mark.parametrize("frame", [0.02, 0.1, 0.4, 2.0, 12.0, 1.7])
 def test_subarray_reference_intervals_and_endpoints(channel, frame):
+    """Verify the IRAC central-pixel cadence and 3.231-ms midpoint offset across
+    channels.
+    """
     header = timing_header(frame=frame, channel=channel)
     t = get_time(header, np.array([0, 57, 63]))
     # Handbook D.1 independently specifies the midpoint relative to resets.
     offsets = (t - header["BMJD_OBS"]) * 86400
-    assert offsets[0] == pytest.approx(frame / 2 + 0.003231, abs=4e-7)
-    assert offsets[-1] == pytest.approx(63.5 * frame + 0.003231, abs=4e-7)
+    assert offsets[0] == pytest.approx(frame / 2 + REFERENCE_RESET_PHASE_S, abs=4e-7)
+    assert offsets[-1] == pytest.approx(
+        63.5 * frame + REFERENCE_RESET_PHASE_S, abs=4e-7
+    )
     np.testing.assert_allclose(np.diff(t) * 86400, frame, rtol=0, atol=7e-7)
     assert not np.ma.getmaskarray(t).any()  # rejection must not change row order
 
 
 @pytest.mark.parametrize("frame,exposure", [(0.6, 0.4), (12.0, 10.4), (50.0, 46.8)])
 def test_fullframe_midpoint_uses_fowler_frame_not_integration(frame, exposure):
+    """Use FRAMTIME/2 for nominal full-frame timing even when EXPTIME differs."""
     header = timing_header(n=1, frame=frame)
     header["EXPTIME"] = exposure
     assert (get_time(header, [])[0] - header["BMJD_OBS"]) * 86400 == pytest.approx(
@@ -57,6 +68,7 @@ def test_fullframe_midpoint_uses_fowler_frame_not_integration(frame, exposure):
 
 
 def test_nonstandard_cube_and_consecutive_commands_not_extrapolated():
+    """Anchor each cube independently so command gaps survive unusual cube lengths."""
     for n in (2, 7, 64):
         h1 = timing_header(n=n, frame=0.4)
         h2 = timing_header(n=n, frame=0.4, start=55000 + (n * 0.4 + 1.8) / 86400)
@@ -65,6 +77,9 @@ def test_nonstandard_cube_and_consecutive_commands_not_extrapolated():
 
 
 def test_tdb_header_conversion_real_handbook_units():
+    """Convert barycentric UTC using mission-clock seconds and require both clock
+    keywords.
+    """
     h = timing_header(n=1)
     # Mission ET/UTC clocks, in seconds. Neither is itself the light-time correction.
     assert tdb_minus_utc(h) == pytest.approx(66.184, abs=1e-7)
@@ -82,6 +97,9 @@ def test_tdb_header_conversion_real_handbook_units():
     [("BMJD_OBS", np.nan), ("FRAMTIME", -1), ("FRAMTIME", np.inf), ("NAXIS", 4)],
 )
 def test_invalid_timing_fails(key, value):
+    """Reject nonfinite anchors, invalid frame durations and unsupported timing
+    geometry.
+    """
     h = timing_header()
     h[key] = value
     with pytest.raises(ValueError):
@@ -90,11 +108,15 @@ def test_invalid_timing_fails(key, value):
 
 @pytest.mark.parametrize("ignore", [[-1], [64], [0.5]])
 def test_invalid_frame_positions_fail(ignore):
+    """Reject fractional or out-of-cube frame exclusions instead of changing row
+    identity.
+    """
     with pytest.raises(ValueError, match="integer cube positions"):
         get_time(timing_header(), ignore)
 
 
 def test_masked_and_partial_bin_midpoints_are_measured_from_survivors():
+    """Compute median times from surviving rows, retaining the final partial bin."""
     times = get_time(timing_header(n=7))
     times.mask[[0, 1, 4, 5]] = True
     med, std = bin_array(times, 3)
@@ -149,6 +171,9 @@ def legacy_products(tmp_path, n=64, mask_policy="finite_flux", time_scale="utc")
 def test_repair_validates_masks_rebins_and_preserves_non_time_bytes(
     tmp_path, mask_policy, time_scale
 ):
+    """Validate both historical mask policies and preserve every non-time token in
+    corrected copies.
+    """
     args, new = legacy_products(
         tmp_path, mask_policy=mask_policy, time_scale=time_scale
     )
@@ -194,6 +219,9 @@ def test_repair_validates_masks_rebins_and_preserves_non_time_bytes(
 
 
 def test_repair_fullframe_utc_unchanged_and_tdb_shift(tmp_path):
+    """Keep nominal full-frame UTC midpoints and apply the independently specified
+    TDB offset.
+    """
     args, _ = legacy_products(tmp_path, n=1)
     report = correct_products(**args)
     assert report["full_shift_seconds"]["max"] == 0
@@ -215,6 +243,9 @@ def test_repair_fullframe_utc_unchanged_and_tdb_shift(tmp_path):
     ],
 )
 def test_repair_refuses_unverifiable_inputs_without_writes(tmp_path, corruption):
+    """Refuse mismatched rows, bin statistics, fluxes or header identities before
+    writing.
+    """
     args, _ = legacy_products(tmp_path)
     if corruption == "unknown_bin_size":
         args["bin_size"] = 13
@@ -244,6 +275,7 @@ def test_repair_refuses_unverifiable_inputs_without_writes(tmp_path, corruption)
 
 
 def test_repair_rejects_same_paths_and_cannot_run_without_audit(tmp_path):
+    """Require separate output paths and an audit before applying any correction."""
     args, _ = legacy_products(tmp_path)
     with pytest.raises(ValueError, match="distinct paths"):
         correct_products(**args, output_full=args["full"])
@@ -252,6 +284,9 @@ def test_repair_rejects_same_paths_and_cannot_run_without_audit(tmp_path):
 
 
 def test_inventory_explicit_aors_counts_and_header_only_reconstruction(tmp_path):
+    """Require explicit AOR/count selection and reconstruct timing solely from
+    inventoried headers.
+    """
     root = tmp_path / "data/ch3"
     folder = root / "r123/ch3/bcd"
     folder.mkdir(parents=True)
@@ -272,6 +307,9 @@ def test_inventory_explicit_aors_counts_and_header_only_reconstruction(tmp_path)
 
 
 def test_header_inventory_paths_are_never_dereferenced(tmp_path):
+    """Treat inventory filenames as identities rather than instructions to read
+    external data.
+    """
     args, _ = legacy_products(tmp_path)
     inv = json.loads(args["headers"].read_text())
     inv["entries"][0]["id"] = "/unavailable/header-only/never-open-this.fits"
@@ -280,6 +318,9 @@ def test_header_inventory_paths_are_never_dereferenced(tmp_path):
 
 
 def test_correction_exports_consistent_aor_breaks(tmp_path):
+    """Export AOR boundaries in the same corrected time convention as the light
+    curve.
+    """
     args, new = legacy_products(tmp_path, time_scale="tdb")
     args.update(
         output_full=tmp_path / "fixed.dat",
@@ -295,6 +336,7 @@ def test_correction_exports_consistent_aor_breaks(tmp_path):
 
 
 def test_repair_empty_bins_and_partial_final_bin(tmp_path):
+    """Validate empty and partial legacy bins without changing their row membership."""
     args, _ = legacy_products(tmp_path, n=7)
     full = np.loadtxt(args["full"])
     full[:7, 0] = np.nan
@@ -324,6 +366,7 @@ def test_repair_empty_bins_and_partial_final_bin(tmp_path):
 
 
 def test_legacy_companion_timing_uses_shared_absolute_reference():
+    """Append absolute companion midpoints using the shared IRAC timing calculation."""
     from SPCA.irac_timing import exposure_midpoints
     from SPCA.Photometry_Companion import get_time as companion_time
 

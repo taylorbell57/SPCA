@@ -20,6 +20,7 @@ from .irac_timing import timing_header, validate_preloaded_time
 from .Photometry_Common import (
     _get_pool,
     bin_array,
+    bin_timestamps,
     clip_data,
     create_folder,
     highpassflist,
@@ -663,7 +664,6 @@ def get_lightcurve(
         moveCentroids (iterable, optional): True centers each aperture on its
             frame's flux-weighted centroid. Missing/clipped centroids produce
             NaN fluxes. False uses the median valid centroid. Default is [True].
-        rerun_photometry (bool, optional): Whether to overwrite old photometry if it exists. Default is False.
         ncpu (int, optional): The number of aperture radii to try at the same time with multiprocessing. Default is 4.
 
     Raises:
@@ -678,6 +678,12 @@ def get_lightcurve(
     """
 
     validate_channel(channel)
+    from .timing_correction import assert_reduction_tree
+
+    if save:
+        assert_reduction_tree(
+            os.path.join(basepath, planet, "analysis", channel, "bestPhOption.txt")
+        )
     if time_scale not in ("utc", "tdb"):
         raise ValueError("time_scale must be utc or tdb")
 
@@ -887,6 +893,16 @@ def get_lightcurve(
                 all_edges.append(edge)
                 all_rs.append(r_tmp)
 
+    # Check before RMS ranking appends selection metadata. A new dataset may
+    # reuse a technique directory, but an existing science pair is immutable.
+    if save:
+        for technique in techniques:
+            for name in (save_full, save_bin):
+                destination = os.path.join(technique, name)
+                assert_reduction_tree(destination)
+                if os.path.lexists(destination):
+                    raise FileExistsError(f"Photometry already exists: {destination}")
+
     BIN_datas = []
     if bin_data:
         RMS_fluxes = np.zeros((int(np.ceil(fluxes.shape[0] / bin_size)), 0))
@@ -899,10 +915,9 @@ def get_lightcurve(
             # Bin metadata from the same surviving frames as this flux series.
             binned = [
                 bin_array(np.ma.masked_where(np.ma.getmaskarray(flux), data), bin_size)
-                for data in (time, xo, yo, xw, yw, bg, npp)
+                for data in (xo, yo, xw, yw, bg, npp)
             ]
             (
-                (binned_time, binned_time_std),
                 (binned_xo, binned_xo_std),
                 (binned_yo, binned_yo_std),
                 (binned_xw, binned_xw_std),
@@ -910,6 +925,7 @@ def get_lightcurve(
                 (binned_bg, binned_bg_std),
                 (binned_npp, binned_npp_std),
             ) = binned
+            binned_time, binned_time_std = bin_timestamps(time, flux, bin_size)
             BIN_data = bin_all_data(
                 highpassWidth_tmp,
                 flux,
@@ -994,7 +1010,12 @@ def get_lightcurve(
 
             savepath_tmp = savepath + folder
 
-            savepath_tmp = create_folder(savepath_tmp, True, True)
+            savepath_tmp = create_folder(
+                savepath_tmp,
+                True,
+                True,
+                products=(save_full, save_bin) if save else (),
+            )
 
         # Plot the photometry if requested
         if savePlots or showPlots:
@@ -1088,6 +1109,7 @@ import unittest
 class TestAperturehotometryMethods(unittest.TestCase):
     # Test that centroiding gives the expected values and doesn't swap x and y
     def test_FWM_centroiding(self):
+        """Recover independent x/y centroids without swapping image axes."""
         fake_images = np.zeros((4, 32, 32))
         for i in range(fake_images.shape[0]):
             fake_images[i, 14 + i, 15] = 2
@@ -1097,6 +1119,9 @@ class TestAperturehotometryMethods(unittest.TestCase):
 
     # Test that circular aperture photometry properly follows the input centroids and gives the expected values
     def test_circularAperture(self):
+        """Follow moving source centroids and recover total flux at each tested
+        aperture radius.
+        """
         image_stack = np.zeros((4, 32, 32))
 
         for i in range(image_stack.shape[0]):

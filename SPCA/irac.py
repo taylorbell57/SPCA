@@ -1,10 +1,12 @@
-"""IRAC channel identities and SPCA's historical aperture-directory names."""
+"""IRAC channel identities and photometry-directory compatibility."""
+
+from pathlib import Path
 
 CHANNELS = ("ch1", "ch2", "ch3", "ch4")
+# Nominal band wavelengths in micrometres (IRAC Instrument Handbook, Table 2.1).
 WAVELENGTH_UM = dict(zip(CHANNELS, (3.6, 4.5, 5.8, 8.0)))
-# ch1/ch2 are existing on-disk names. ch3/ch4 extend that integer-wavelength
-# convention; earlier SPCA incorrectly sent every non-ch1 channel to 4um.
-APERTURE_PREFIX = dict(zip(CHANNELS, ("3um", "4um", "5um", "8um")))
+APERTURE_PREFIX = dict(zip(CHANNELS, CHANNELS))
+LEGACY_PREFIX = {"ch1": "3um", "ch2": "4um"}
 DETECTOR = dict(zip(CHANNELS, ("InSb", "InSb", "Si:As", "Si:As")))
 
 
@@ -16,7 +18,32 @@ def validate_channel(channel):
 
 
 def aperture_prefix(channel):
+    """Return the channel prefix used for all newly generated photometry."""
     return APERTURE_PREFIX[validate_channel(channel)]
+
+
+def photometry_prefixes(channel):
+    """Readable prefixes, including existing ch1/ch2 wavelength names."""
+    validate_channel(channel)
+    return (channel, LEGACY_PREFIX[channel]) if channel in LEGACY_PREFIX else (channel,)
+
+
+def resolve_photometry_dir(parent, channel, suffix, filename):
+    """Find a dataset in either convention; refuse ambiguous coexisting copies.
+
+    Explicit paths in bestPhOption.txt bypass this lookup. Neither convention
+    takes precedence when both contain the requested dataset.
+    """
+    candidates = [
+        Path(parent) / (prefix + suffix)
+        for prefix in photometry_prefixes(channel)
+        if (Path(parent) / (prefix + suffix) / filename).is_file()
+    ]
+    if len(candidates) > 1:
+        raise ValueError(f"Ambiguous photometry for {filename}: {candidates}")
+    if not candidates:
+        raise FileNotFoundError(f"No {channel}{suffix} photometry for {filename}")
+    return str(candidates[0]) + "/"
 
 
 def validate_header_channel(header, channel):

@@ -6,7 +6,13 @@ from astropy.stats import sigma_clip
 
 from .irac import aor_tag, aperture_prefix
 from .irac_timing import timing_header, validate_preloaded_time
-from .Photometry_Common import bin_array, clip_data, create_folder, prepare_images
+from .Photometry_Common import (
+    bin_array,
+    bin_timestamps,
+    clip_data,
+    create_folder,
+    prepare_images,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -129,7 +135,6 @@ def get_lightcurve(
             frame to remove first-frame systematic).
         maskStars (list, optional): An array-like object where each element is an array-like object with the RA and DEC
             coordinates of a nearby star which should be masked out when computing background subtraction.
-        rerun_photometry (bool, optional): Whether to overwrite old photometry if it exists. Default is False.
 
     Raises:
         Error: If Photometry method is not supported/recognized by this pipeline.
@@ -205,7 +210,7 @@ def get_lightcurve(
         if bin_data:
             print("Binning... ", end="", flush=True)
             binned_P, binned_P_std = bin_array2D(P, bin_size)
-            binned_time, binned_time_std = bin_array(time, bin_size)
+            binned_time, binned_time_std = bin_timestamps(time, P, bin_size)
             binned_bg, binned_bg_std = bin_array(bg, bin_size)
 
             # sigma clip binned data to remove wildly unacceptable data
@@ -235,7 +240,12 @@ def get_lightcurve(
                 savepath += "noIgnore/"
 
             # create save folder
-            savepath = create_folder(savepath + folder, True, True)
+            savepath = create_folder(
+                savepath + folder,
+                True,
+                True,
+                products=(save_full, save_bin) if save else (),
+            )
 
         if savePlots or showPlots:
             if bin_data:
@@ -287,7 +297,8 @@ def get_lightcurve(
                     target_coord,
                     time_format,
                     bin_size=bin_size,
-                    binning="median of finite timestamps; independent of flux masks",
+                    binning="median of timestamps of surviving flux samples",
+                    flux_preprocessing="neighbor-median imputation during clipping",
                 ),
             )
             if bin_data:
@@ -315,7 +326,8 @@ def get_lightcurve(
                         target_coord,
                         time_format,
                         bin_size=bin_size,
-                        binning="median of finite timestamps; independent of flux masks",
+                        binning="median of timestamps of surviving flux samples",
+                        flux_preprocessing="neighbor-median imputation during clipping",
                     ),
                 )
 

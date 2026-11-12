@@ -30,10 +30,22 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord, get_body_barycentric_posvel
 from astropy.time import Time
 
-SECONDS_PER_DAY = 86400.0
-JD_MJD_OFFSET = 2400000.5
-C_KM_S = 299792.458
-SUBARRAY_MIDPOINT_OFFSET_S = 0.003231
+SECONDS_PER_DAY = 86400.0  # nominal day in SI seconds
+JD_MJD_OFFSET = 2400000.5  # JD - MJD, in days (IAU MJD definition)
+# Absolute sidecar round-trip tolerance (~17 us), allowing decimal/float
+# serialization while detecting millisecond changes. Never use relative JD error.
+AOR_BOUNDARY_ATOL_DAYS = 2e-10
+C_KM_S = 299792.458  # exact SI speed of light, converted to km/s
+# IRAC central-pixel midpoint relative to the initial reset; includes the
+# reset-phase difference and half a subarray clock tick (IRAC Handbook D.1.5).
+# https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/irachpp/timing/
+SUBARRAY_MIDPOINT_OFFSET_S = 3.231e-3
+# Engineering checks, not absolute accuracy claims: rounded 1e-7-day header
+# anchors contribute up to 8.64 ms to closure; allow 20 ms with builtin Sun.
+HEADER_DIRECTION_CLOSURE_ATOL_S = 0.020
+# Covers a usual 64 x 2 s cube. Neglected 1-AU orbital acceleration contributes
+# roughly a*t^2/(2*c) = 0.17 ms at 130 s; longer propagation needs an orbit model.
+MAX_LINEAR_STATE_OFFSET_S = 130.0
 TIMING_VERSION = "irac-midpoint-v3"
 
 
@@ -123,10 +135,12 @@ def target_correction(header, target_coord, offsets):
         raise ValueError("Nonfinite spacecraft state or requested direction")
     if not 0 <= ra < 360 or not -90 <= dec <= 90:
         raise ValueError("Invalid RA_RQST/DEC_RQST")
+    # Broad heliocentric sanity bounds around Spitzer's Earth-trailing orbit:
+    # distance 100-200 million km; speed at most 50 km/s. These detect bad units.
     if not 1e8 < np.linalg.norm(state) < 2e8 or np.linalg.norm(velocity) > 50:
         raise ValueError("Invalid heliocentric spacecraft state (km, km/s required)")
     offsets = np.asarray(offsets)
-    if np.any(offsets < 0) or np.any(offsets > 130):
+    if np.any(offsets < 0) or np.any(offsets > MAX_LINEAR_STATE_OFFSET_S):
         raise ValueError("DCE exceeds validated 130 s linear-state interval")
     sun, sun_velocity = _sun_state(et)
     pos = state + sun
@@ -137,7 +151,7 @@ def target_correction(header, target_coord, offsets):
         raise ValueError("A single ICRS target coordinate is required")
     target = target / np.linalg.norm(target)
     closure = np.dot(pos, reference) / C_KM_S - anchor
-    if abs(closure) > 0.020:
+    if abs(closure) > HEADER_DIRECTION_CLOSURE_ATOL_S:
         raise ValueError(
             f"Header barycentric direction does not close ({closure:.6f} s); "
             "check IER pointing/ephemeris"
@@ -207,6 +221,8 @@ def timing_metadata(time_scale="tdb", target_coord=None, time_format="bmjd"):
             "IER direction must pass geometric closure when target supplied"
         ),
         "binning": "median of timestamps of surviving flux samples",
+        "bin_membership": "consecutive sorted rows; may cross AOR boundaries",
+        "missing_contributor_time": "NaN time and scatter; flux unchanged",
         "time_std": "population standard deviation in days, not clock error",
     }
 
@@ -329,7 +345,9 @@ def load_aor_breaks(full_path, analysis_dir, snippet, aors):
         not np.isfinite(start_values).all()
         or np.any(np.diff(start_values) <= 0)
         or values.shape != (len(starts) - 1,)
-        or not np.allclose(values, start_values[1:], rtol=0, atol=2e-10)
+        or not np.allclose(
+            values, start_values[1:], rtol=0, atol=AOR_BOUNDARY_ATOL_DAYS
+        )
     ):
         raise ValueError(f"Invalid dataset-specific AOR boundaries: {path}")
     return model_times(path, values)

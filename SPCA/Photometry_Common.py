@@ -1,5 +1,6 @@
 import glob
 import hashlib
+import json
 import os
 import pickle
 import warnings
@@ -17,7 +18,12 @@ from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
 from .irac import aor_breaks_name, validate_channel, validate_header_channel
-from .irac_timing import exposure_midpoints, timing_header
+from .irac_timing import (
+    AOR_BOUNDARY_ATOL_DAYS,
+    exposure_midpoints,
+    read_timing,
+    timing_header,
+)
 from .spitzer_products import validate_science_product
 
 warnings.filterwarnings("ignore")
@@ -40,22 +46,36 @@ def _get_pool(processes):
     return context.Pool(processes)
 
 
-def create_folder(fullname, auto=False, overwrite=False):
+def create_folder(fullname, auto=False, overwrite=False, products=()):
     """Create a folder unless it exists.
 
     Args:
         fullname (string): Full path to the folder to be created.
         auto (bool, optional): If the folder already exists, should the folder just be skipped (True)
             or should the user be asked whether they want to overwrite the folder or change the folder name (False, Default).
-        overwrite (bool, optional): Whether you want to overwrite the folder if it already exists
+        overwrite (bool, optional): Reuse a nonempty directory without prompting.
+            No directory contents are removed; product safeguards still apply.
+        products (iterable): Output filenames that must not already exist.
+            Directory reuse may add datasets but cannot replace these files.
+            Corrected siblings are left intact; recursive cleanup protection
+            belongs to assert_reduction_tree(..., recursive=True).
 
     Returns:
         string: The final name used for the folder.
 
     """
 
+    from .timing_correction import assert_reduction_tree
+
     solved = "no"
     while solved == "no":
+        # Recheck the actual destination after any interactive name change.
+        assert_reduction_tree(fullname)
+        for name in products:
+            path = Path(fullname) / name
+            assert_reduction_tree(path)
+            if path.exists() or path.is_symlink():
+                raise FileExistsError(f"Photometry already exists: {path}")
         if not os.path.exists(fullname):
             # Folder doesn't exist yet and can be safely written to
             os.makedirs(fullname)
@@ -393,7 +413,11 @@ def bgsubtract(bounds=(11, 19, 11, 19), i=0):
 
 
 def bin_array(data, size):
-    """Median bin an array.
+    """Return sample medians and population scatter in consecutive row bins.
+
+    Masked/nonfinite values are excluded; empty bins remain NaN and the final
+    partial bin is retained. Bins follow sorted rows and may cross AOR gaps.
+    Scatter is not a propagated uncertainty on the median.
 
     Args:
         data (1D array): Array of data to be binned.
@@ -421,6 +445,39 @@ def bin_array(data, size):
             binned_data_std[i] = np.ma.std(values)
 
     return binned_data, binned_data_std
+
+
+def bin_timestamps(time, flux, size):
+    """Represent each median-flux bin by its contributing samples' median time.
+
+    Use the post-clipping flux mask, including nonfinite fluxes. A median has
+    no fixed linear weights, so this is a representative sampling time, not an
+    exact effective time for a varying signal. Return population time scatter
+    in the input units (days for SPCA products). If any contributing exposure
+    lacks a timestamp, both time statistics are NaN; never change flux or bin
+    membership to conceal missing timing. Binned-level rejection removes the
+    whole flux measurement, without recomputing these sampling statistics.
+    PLD vectors may be passed as (exposure, pixel). A bin has a common time
+    only when all pixel medians use the same exposure mask; otherwise its
+    timestamp/scatter remain NaN while its pixel measurements are preserved.
+    """
+    time = np.ma.masked_invalid(np.ma.asarray(time, dtype=float))
+    flux = np.ma.masked_invalid(np.ma.asarray(flux, dtype=float))
+    if time.ndim != 1 or flux.ndim not in (1, 2) or len(time) != len(flux):
+        raise ValueError("Time and flux must have matching exposure rows")
+    rejected = np.ma.getmaskarray(flux)
+    if flux.ndim == 2:
+        contributing = ~rejected.all(axis=1)
+        ambiguous = rejected.any(axis=1) & contributing
+    else:
+        contributing = ~rejected
+        ambiguous = np.zeros(len(time), dtype=bool)
+    median, scatter = bin_array(np.ma.array(time, mask=~contributing), size)
+    missing = (contributing & np.ma.getmaskarray(time)) | ambiguous
+    for i, start in enumerate(range(0, len(time), int(size))):
+        if missing[start : start + int(size)].any():
+            median[i] = scatter[i] = np.nan
+    return median, scatter
 
 
 def highpassflist(signal, highpassWidth):
@@ -474,6 +531,9 @@ def _load_oversample_cache(savename, expected_shape):
 
 def _save_oversample_cache(image, savename):
     """Atomically write a cache so interrupted writes never leave a partial file."""
+    from .timing_correction import assert_reduction_tree
+
+    assert_reduction_tree(savename)
     os.makedirs(os.path.dirname(savename) or ".", exist_ok=True)
     temporary = f"{savename}.{os.getpid()}.tmp"
     try:
@@ -708,6 +768,8 @@ def prepare_images(
     """
 
     validate_channel(channel)
+    from .timing_correction import assert_reduction_tree
+
     if len(background_bounds) != 4 or not (
         0 <= background_bounds[0] < background_bounds[1] <= 32
         and 0 <= background_bounds[2] < background_bounds[3] <= 32
@@ -799,8 +861,50 @@ def prepare_images(
     )
     breakpath = basepath + planet + "/analysis/" + channel + "/aorBreaks.txt"
     selected_breakpath = str(Path(breakpath).parent / aor_breaks_name(AOR_snip))
+    # Preparation writes only these boundaries and optional cache entries.
+    # Corrected products for other datasets in this channel are read-only
+    # siblings, not a reason to block this selection.
+    assert_reduction_tree(breakpath)
+    if not Path(selected_breakpath).exists():
+        assert_reduction_tree(selected_breakpath)
+    # Different directory prefixes share this dataset-specific sidecar. Reuse
+    # compatible metadata verbatim; changing its time basis would invalidate
+    # existing photometry even when the new tables have different names.
+    if Path(selected_breakpath).exists():
+        existing = read_timing(selected_breakpath)
+        expected = json.loads(declaration.split("SPCA_TIMING_JSON=", 1)[1])
+        keys = (
+            "version",
+            "format",
+            "scale",
+            "barycentric",
+            "target_icrs_deg",
+            "aor_starts",
+        )
+        if any(existing.get(key) != expected[key] for key in keys):
+            raise FileExistsError(
+                f"Dataset-specific AOR timing already exists: {selected_breakpath}; "
+                "use a separate analysis directory"
+            )
+        payload = [
+            line
+            for line in Path(selected_breakpath).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        values = np.loadtxt(payload, ndmin=1) if payload else np.array([])
+        # Match the model loader's absolute tolerance: 2e-10 days (~17 us)
+        # permits float/text rounding while resolving millisecond corruption.
+        # Zero relative tolerance is essential for absolute JD/MJD values.
+        if values.shape != (len(breaktimes),) or not np.allclose(
+            values, breaktimes, rtol=0, atol=AOR_BOUNDARY_ATOL_DAYS
+        ):
+            raise ValueError(
+                f"Invalid dataset-specific AOR boundaries: {selected_breakpath}"
+            )
     os.makedirs(os.path.dirname(breakpath), exist_ok=True)
     for destination in (breakpath, selected_breakpath):
+        if destination == selected_breakpath and Path(destination).exists():
+            continue
         with open(destination, "w") as stream:
             stream.write("# " + declaration.replace("\n", "\n# ") + "\n")
             stream.write(" ".join(f"{value:.15f}" for value in breaktimes) + "\n")

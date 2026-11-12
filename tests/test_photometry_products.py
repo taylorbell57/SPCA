@@ -54,6 +54,7 @@ class PhotometryProductTests(unittest.TestCase):
         self.bcd.mkdir(parents=True)
 
     def test_alternative_versions_never_mix(self):
+        """Discover only the selected BCD or CBCD version of each science exposure."""
         for name in ("a_bcd.fits", "a_cbcd.fits", "a_bunc.fits"):
             (self.bcd / name).touch()
         files, lengths = get_fnames(str(self.data), "r")
@@ -72,10 +73,16 @@ class PhotometryProductTests(unittest.TestCase):
             self.assertEqual(count, 1)
 
     def test_cbcd_only_directory_is_recognized(self):
+        """Recognize extracted campaigns containing CBCD science images without BCD
+        counterparts.
+        """
         (self.bcd / "a_cbcd.fits").touch()
         self.assertEqual(make_directory_structure(self.root), "r123")
 
     def test_cbcd_cannot_reuse_bcd_oversampling_cache(self):
+        """Separate cached interpolations for alternative processing versions of the
+        same exposure.
+        """
         filename = "SPITZER_I1_123_0002_6_C7915448_cbcd.fits"
         image = self.bcd / filename
         header = fits.Header(
@@ -124,6 +131,9 @@ class PhotometryProductTests(unittest.TestCase):
             self.assertEqual(old.read_bytes(), b"other cache")
 
     def test_oversampling_cache_is_unique_per_aor_exposure(self):
+        """Include full archive identities so equal exposure numbers in different
+        AORs cannot collide.
+        """
         images = []
         # Both AORs contain exposure 0002; their pixel values differ.
         for aor, value in (("28566016", 1.0), ("28578560", 5.0)):
@@ -165,6 +175,9 @@ class PhotometryProductTests(unittest.TestCase):
             np.testing.assert_allclose(after[:, :-1], value / 4)
 
     def test_oversampling_cache_tracks_scale_stack_and_image_contents(self):
+        """Invalidate interpolation caches when scale, correction stack or prepared
+        pixels change.
+        """
         image = self.bcd / "SPITZER_I1_123_0002_6_C7915448_bcd.fits"
         _write_image(image, 2.0)
         stack = self.root / "correction_stack.fits"
@@ -229,6 +242,9 @@ class PhotometryProductTests(unittest.TestCase):
 
     def test_cache_key_changes_when_only_the_mask_changes(self):
         # maskStars and ignoreFrames act through the mask, which is hashed.
+        """Include masks in cache identity even when underlying pixel values are
+        unchanged.
+        """
         name = "SPITZER_I1_123_0002_6_C7915448_bcd.fits"
         image = np.ma.masked_array(np.ones((1, 32, 32)))
         masked = image.copy()
@@ -243,6 +259,9 @@ class PhotometryProductTests(unittest.TestCase):
         )
 
     def test_cache_directory_is_created_when_saving(self):
+        """Create the oversampling cache directory automatically before writing
+        entries.
+        """
         image = self.bcd / "SPITZER_I1_123_0002_6_C7915448_bcd.fits"
         _write_image(image, 2.0)
         cache = self.root / "analysis/ch1/addedBlank/Oversampled"
@@ -265,6 +284,7 @@ class PhotometryProductTests(unittest.TestCase):
         np.testing.assert_allclose(again, first)
 
     def test_corrupt_or_interrupted_oversampling_cache_is_regenerated(self):
+        """Regenerate malformed caches instead of reusing incomplete interpolations."""
         image = self.bcd / "SPITZER_I1_123_0002_6_C7915448_bcd.fits"
         _write_image(image, 2.0)
         savepath = str(self.root) + "/"
@@ -304,6 +324,9 @@ class PhotometryProductTests(unittest.TestCase):
         self.assertEqual(calls, 0)
 
     def test_sky_dark_filename_selects_external_stack_and_prepares_image(self):
+        """Use the selected sky-dark filename to choose the matching external
+        correction stack.
+        """
         dark_name = "SPITZER_I1_68573184_0002_6_C7915448_sdark.fits"
         cal = self.data / "r123/ch1/cal"
         cal.mkdir()
@@ -339,6 +362,9 @@ class PhotometryProductTests(unittest.TestCase):
         np.testing.assert_allclose(blank[:, :-1], 2.0)
 
     def test_each_aor_uses_its_own_correction_stack(self):
+        """Apply each AOR's calibration association rather than reusing the first
+        stack globally.
+        """
         header = fits.Header(
             {
                 "GAIN": 1.0,
@@ -430,6 +456,9 @@ class PhotometryPathTests(unittest.TestCase):
         return seen
 
     def test_aperture_psf_and_pld_load_only_selected_version(self):
+        """Route the chosen science processing version through all shared extraction
+        methods.
+        """
         for module in (Photometry_Aperture, Photometry_PSF, Photometry_PLD):
             for product in ("bcd", "cbcd"):
                 with self.subTest(module=module.__name__, product=product):
@@ -439,6 +468,9 @@ class PhotometryPathTests(unittest.TestCase):
                     )
 
     def test_companion_opens_only_selected_version(self):
+        """Restrict specialized companion extraction to the requested science-image
+        version.
+        """
         for product in ("bcd", "cbcd"):
             with self.subTest(product=product):
                 opener = Mock(side_effect=Stop)

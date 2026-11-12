@@ -286,7 +286,10 @@ def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", 
         mask_aper = np.logical_not(MASK)
 
     if "psfx" in mode.lower():
-        foldername_psf = "/".join(foldername.split("/")[:-2]) + "/" + foldername_psf
+        if not os.path.isabs(foldername_psf):
+            foldername_psf = os.path.join(
+                os.path.dirname(foldername.rstrip("/")), foldername_psf
+            )
         require_matching_times(foldername + filename, 2, foldername_psf + filename, 2)
         xdata = np.loadtxt(foldername_psf + filename, usecols=[4], skiprows=1)  # pixel
         ydata = np.loadtxt(foldername_psf + filename, usecols=[6], skiprows=1)  # pixel
@@ -494,7 +497,10 @@ def get_full_data(
         mask_aper = np.logical_not(MASK)
 
     if "psfx" in mode.lower():
-        foldername_psf = "/".join(foldername.split("/")[:-2]) + "/" + foldername_psf
+        if not os.path.isabs(foldername_psf):
+            foldername_psf = os.path.join(
+                os.path.dirname(foldername.rstrip("/")), foldername_psf
+            )
         require_matching_times(foldername + filename, 1, foldername_psf + filename, 1)
         xdata = np.loadtxt(foldername_psf + filename, usecols=[2], skiprows=1)  # pixels
         ydata = np.loadtxt(foldername_psf + filename, usecols=[3], skiprows=1)  # pixels

@@ -1,146 +1,148 @@
 # SPCA
 
-SPCA is an open-source, modular, and automated pipeline for Spitzer Phase Curve Analyses.
+SPCA reduces and analyzes Spitzer/IRAC time-series observations using aperture,
+PSF and pixel-level photometry, detector decorrelation, and astrophysical models.
+The [API documentation](https://spca.readthedocs.io) describes the package modules.
 
-The full API can be found at [https://spca.readthedocs.io](https://spca.readthedocs.io).
+## Installation
 
-## Installation Instructions
+SPCA requires Python 3.9 or newer:
 
-SPCA requires Python 3.9 or newer. To install it, run the following in a terminal:
-
-```
-        git clone https://github.com/lisadang27/SPCA.git
-        cd SPCA
-        python -m pip install .
-        # IF you want to install george to run GP analyses, also then run
-        python -m pip install ".[GP]"
+```bash
+git clone https://github.com/lisadang27/SPCA.git
+cd SPCA
+python -m pip install .
 ```
 
-For development, use `python -m pip install -e ".[dev]"` (or
-`python -m pip install -e ".[dev,GP]"` for GP support) so edits to the package
-are available without reinstalling. Then run `pre-commit install` to enable the
-formatting and file checks on each commit. They format Python files and notebook
-code, check JSON, TOML, and YAML files, and fix common whitespace issues. If a
-hook changes a file, review and stage the changes before committing again. To
-check specific files before committing, run `pre-commit run --files path/to/file`.
+Optional dependencies are available as `.[GP]` for Gaussian-process models and
+`.[download]` for archive downloads. For development:
 
-Please note that SPCA is in a state of testing and development. The developers of this repo have very limited time to spend on maintenance and development.
+```bash
+python -m pip install -e '.[dev,download]'
+pre-commit install
+MPLBACKEND=Agg python -m pytest tests
+```
 
-## Update Log
+Pre-commit formats Python/notebook code and checks file structure and whitespace.
+Run it on specific files with `pre-commit run --files path/to/file`.
 
-### Version 0.3
-As of version 0.3, we have made some important changes. These include:
-* Added the ability to perform full-frame photometry
-* Added the ability to fit unbinned photometry
-* Added the ability to decorrelate using PSF-fitted centroids using the "\_PSFX" mode suffix
-* Added sigma-clipping along full time axis (not just within data cube). This comes at the cost of needing to load all frames into RAM at the same time which can be quite RAM intensive for some phase curves. Will consider allowing user to switch to using dask in the future to reduce RAM cost when performing photometry at the cost of slower run speeds.
-* Changed BLISS knot density selection algorithm to be more like POET's algorithm
-* Added a progress bar for when running photometry
-* No updates on emcee freezing, but it now rarely ever occurs for me (Taylor). Perhaps the better initialization routine is helping here.
+## Workflow
 
-### Version 0.2
-As of version 0.2, we have made some important changes and some bug fixes. These include:
-* Renamed decorrelation and fitting file to Decorrelation (.py and .ipynb)
-* Full integration of PLD and PLDAper models
-* Reduced the amount of static code that the user sees and placed this in separate files instead.
-* Changed how photometry is saved. This will not be noticeable unless you want to use PLDAper models which cannot be run with the old photometry.
-* Also changed the units in which the photometry is saved so that it is easy to compute the photon noise limit - a calculation that was previously done incorrectly.
-* The emcee fitting routine sometimes freezing still seems to be an issue as of v0.2. This seems to be caused by the combination of a large dataset and either a large model or a poorly initialized model. Previous attempts at forcing a timeout have failed without directly editing emcee or multiprocessing code. If this occurs to you and you need to analyze your data soon, I'd recommend removing the few lines that use multiprocessing - contact us if you have a hard time doing this. We are looking into different samplers (such as PyMC3) to resolve this issue.
+The driver scripts have corresponding notebooks for interactive analysis.
+Configure the settings near the top of each driver for your observations.
 
-## Package Usage
-
-0. Follow the installation instructions at the top of this page to ensure you have all of the necessary dependencies.
-
-1. Obtain Spitzer Level 1 BCD data using the [programmatic workflow](#programmatic-spitzerirac-downloads)
+1. Obtain Level 1 BCD images through the [download workflow](#programmatic-spitzerirac-downloads)
    or the [Spitzer Heritage Archive](https://sha.ipac.caltech.edu/applications/Spitzer/SHA/).
-   For browser downloads, place the ZIP files in your planet/campaign directory.
    Keep independent observing campaigns in separate directories.
+2. Run `Make_Directory_Structure` on the campaign directory. It extracts ZIPs into
+   `data/chN/r########/chN/bcd/`, preserves channel identities, and moves original
+   ZIPs to `raw/`. Already-extracted downloads can be reused.
+3. Run `Everything_Photometry` to extract light curves and rank aperture methods
+   by scatter after boxcar smoothing at the configured width.
+4. Inspect fluxes, centroids, widths and AOR boundaries with `QuickLook` before
+   deciding which exposures or AORs to exclude.
+5. Run `Decorrelation` with the desired detector and astrophysical models.
+   `Poly#` selects a two-dimensional polynomial, `BLISS` a sensitivity map,
+   and `PLD` pixel-level decorrelation. See the driver settings for combinations
+   and optional terms. `MakeTables` summarizes saved fit results.
 
-Most of the following commands have an .ipynb ending and .py ending option available, where the .py version is optimized for analyzing many data sets and the .ipynb file is optimized for viewing the analysis of a single data set. Each file has a portion at the top where you can set parameters which will determine the techniques.
-
-2. Next, use the Make\_Directory\_Structure file to extract ZIPs or recognize
-already-extracted programmatic downloads and set up the required directories.
-
-ZIP files containing multiple IRAC channels are split into the matching
-`data/chN/` directories, retaining the `AOR/chN/` paths used by the photometry
-pipeline. All channels are preserved; inspect the observations to decide which
-channel to analyze. The original ZIP files are moved to `raw/` after extraction.
-Already-extracted `data/chN/r########/chN/bcd/` trees are reused without ZIP
-copies. Running setup again on these trees is supported.
-
-3. Then use the Everything\_Photometry file to perform a suite of different photometries on your data. The code will automatically select the best aperture photometry method which gives the lowest scatter after smoothing the raw flux by a boxcar filter of a width provided by the user.
-
-4. Then use the QuickLook file to ensure that you have looked at the raw data (to ensure it looks reasonable) and to determine whether you want to remove the first AOR (in case it is a short AOR to be discarded). By looking at the raw data, you can gain some insight into how successful different decorrelation models might be.
-
-5. Then decorrelate the data using the Decorrelation file. Most parameters here are explained with a nearby comment. One key parameter though is the "mode" which sets the decorrelation method used. Modes that contain "Poly#" use a 2-dimentionsal polynomial of order #, modes that contain "BLISS" use BiLinearly-Interpolated Subpixel Sensitivity mapping, modes that contain "GP" use a Gaussian Process using x and y centroid positions as covariates, and modes that contain "PLD#\_$x$" use Pixel Level Decorrelation of order # (1 or 2) and use a pixel stamp size of $ by $ (3x3 or 5x5). PLD performed using aperture photometry (the recommended PLD technique) can be accessed using "PLDAper#\_$x$". Each mode is then followed by an underscore and either "v1" or "v2" indicating the use of either a 1st or 2nd order sinusoidal model for the phase variations. If "PSFX" is present in the mode string for non-PLD models, the data are decorrelated using the PSF-fitted centroids rather than the flux-weighted mean centroids. If "ellipse" is present in the mode string, phase variations due to the elliptical shape of the planet are modelled. Any other text can be added to the mode keyword for your own convenience (e.g. "Poly2\_v1\_run2" or "PLDAper2\_5x5\_v1\_testingFit").
-
-6. Finally, some tables containing a selection of the fitted parameters from each model run can be made using the MakeTables file. These tables will also highlight the best decorrelation method for each analysis, determined using delta-BIC (selecting your model is actually quite a challenging and complicated step, and user discretion is absolutely recommended).
+Photometry preparation loads all selected frames into memory. Large phase
+curves may require substantial RAM. Sampler initialization and convergence
+require inspection; long or stalled MCMC runs should be diagnosed before reuse.
 
 ## IRAC timing and legacy light curves
 
-SPCA photometry defaults to **BMJD_TDB**, in days. Request `time_format="bjd"`
-for BJD_TDB: `BJD_TDB = BMJD_TDB + 2400000.5`. JD versus MJD is a numerical
-format; UTC versus TDB is a time scale. A barycentric correction additionally
-depends on the observer's position and target direction. Neither a format change
-nor a scale conversion recomputes that correction. Instrument-relative clocks
-are not absolute barycentric timestamps. Archive search dates remain UTC.
+### Time conventions
 
-### Exposure times and accuracy
+Photometry defaults to **BMJD_TDB**: barycentric Julian date minus 2,400,000.5
+in the TDB time scale. `time_format="bjd"` selects BJD_TDB;
+`time_scale="utc"` selects barycentric UTC with the repaired frame cadence.
+Model loaders require declared TDB products and normalize BJD_TDB to BMJD_TDB.
+Custom transit epochs default to BMJD_TDB; supply `t0_format="bjd"` for BJD_TDB.
+Archive epochs must have a documented TDB scale, or an independently verified
+`t0_scale="tdb"` assertion.
 
-For a 64-frame subarray cube, frame `i = 0..63` has the central-pixel midpoint
-`(i + 0.5)*FRAMTIME + 0.003231` seconds after its own BCD start. The 3.231-ms
-adjustment follows the [IRAC timing prescription](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/irachpp/timing/).
-The old `linspace` endpoint compressed the cadence; a 2-second cube's last frame
-was about one second early. Independent BCD anchors preserve real command and
-AOR gaps. Full frames use the **nominal `FRAMTIME/2` midpoint**, without a
-calibrated pixel/Fowler readout correction; `EXPTIME/2` is not a substitute.
-Starting from barycentric UTC `BMJD_OBS`, SPCA converts to TDB by adding
-`(ET_OBS - UTCS_OBS)/86400`, as described in the
+`SPCA_TIMING_JSON` headers record format, scale, timing version, target direction
+and binning convention. Preloaded arrays require matching `input_time_metadata`.
+Changing that declaration does not convert the supplied values. Archive search
+dates use UTC.
+
+### Exposure midpoints and accuracy
+
+For zero-based subarray frame `i`, the central-pixel midpoint is
+`(i + 0.5)*FRAMTIME + 0.003231` seconds after its BCD start. The 3.231-ms
+reset-phase adjustment follows the
+[IRAC timing prescription](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/irachpp/timing/).
+Each BCD retains its own anchor, preserving command and AOR gaps. Historical
+SPCA used a compressed `linspace` cadence that placed the last frame of a
+2-second cube about one second early. Full frames use the nominal
+`FRAMTIME/2` midpoint; pixel/Fowler readout-phase corrections remain uncalibrated.
+
+SPCA starts with barycentric UTC `BMJD_OBS` and adds
+`(ET_OBS - UTCS_OBS)/86400` to obtain TDB, following
 [IRAC Handbook §6.3](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/32/).
-Do not apply another Earth-observer barycentric correction to these times.
+Do not apply another Earth-observer barycentric correction.
 
-Supply `target_coord` for either full-frame or subarray photometry to correct
-the header's requested direction to the science target. SPCA uses the
-[header spacecraft position and velocity](https://irsa.ipac.caltech.edu/docs/knowledgebase/spitzer_general.html)
-plus the builtin ERFA barycentric Sun, and evolves the delay linearly within each
-BCD. This is a **target-direction-corrected header timestamp**, retaining the
-mission clock/orbit anchor; it is distinct from an independent precision orbit
-calculation. Without coordinates, SPCA retains the header direction and holds
-its correction fixed within each BCD. Missing or inconsistent required header
-information raises an error. Successive IER observations can have unreliable
-requested pointing, so target correction checks the direction encoded by the
-header delay before using it.
+Supply `target_coord` to correct the requested header direction to the science
+target. SPCA combines the
+[header spacecraft state](https://irsa.ipac.caltech.edu/docs/knowledgebase/spitzer_general.html)
+with the builtin ERFA barycentric Sun and evolves the delay linearly within
+one BCD. The mission clock and orbit anchor are retained. Without coordinates,
+the header-direction correction remains fixed within each BCD. Required header
+state and direction consistency checks must pass, including for IER observations.
 
-Absolute precision remains limited: the documented instrument/spacecraft clock
-uncertainty is typically about 20 ms, with a worst case below 70 ms, and header
-rounding and orbit uncertainties remain. Independent checks against JPL Horizons
-at four epochs found projected header-state differences reaching about **57 ms**;
-they do not establish millisecond accuracy or validate every AOR. The cached
-comparison is reproducible with `python tools/check_irac_ephemeris.py --help`.
-Full-frame midpoint error is not independently bounded. Subarrays use the central
-pixel without the documented row/column refinement; supplied target coordinates
-are treated as static ICRS directions, without new proper-motion or parallax
-corrections. Precision orbit replacement requires independently validated
-spacecraft ephemerides and interpolation.
+The documented clock uncertainty is typically about 20 ms and below 70 ms in the
+worst case. Header rounding and orbit uncertainty also contribute. Cached JPL
+Horizons comparisons at four epochs found projected state differences up to
+57 ms; other observations may differ. Full-frame midpoint error is unbounded by
+these checks. Subarray timing uses the central pixel; target coordinates are
+static ICRS directions without proper-motion or parallax propagation. Precision
+timing needs independently validated spacecraft ephemerides and readout timing.
 
-### Existing products and API compatibility
+### Binned measurements
 
-Older SPCA products may contain **BMJD_UTC**, including the compressed subarray
-cadence. Never interpret or relabel them as BMJD_TDB. New `SPCA_TIMING_JSON`
-headers declare format, scale, timing version, target coordinates when supplied,
-and whether the barycentric reference is the header or target direction.
-`Time std` is within-bin scatter in days, not absolute timing uncertainty.
+Fluxes use **unweighted medians** in consecutive sorted row bins; the final
+partial bin is retained. The representative timestamp is the median time of
+the samples contributing to that flux. Rejected/NaN flux rows are excluded.
+`Time std` is their population scatter in days. A missing timestamp for any
+contributing sample makes both time statistics NaN. PLD bins likewise have
+NaN time statistics if pixel medians use different exposure masks.
 
-Supported legacy aperture products can be corrected without repeating
-photometry when their complete BCD headers reconstruct the original rows and
-binning unambiguously. `python -m SPCA.timing_correction --help` describes header
-inventory export and correction of individual full/binned aperture pairs.
-Report-only is the default. Explicit application writes separate products,
-an optional AOR-boundary file, and a JSON audit with input/output hashes,
-preserving non-time values and rejection masks. Already-versioned or ambiguous
-inputs and destructive overwrites are refused. The utility handles the legacy
-8-column aperture / 16-column binned schema, not arbitrary extraction formats.
-For example, after creating a new destination directory:
+Aperture extraction preserves flux rejections. PSF/PLD retain their legacy
+neighbor-median replacement during clipping, so their contributing series can
+include imputed values. Centroids, widths and backgrounds are median-binned
+with their own finite-value masks; aperture metadata additionally follows its
+flux mask. Binned-level clipping rejects or replaces complete flux bins without
+redefining their exposure membership. None of these extraction paths uses
+inverse-variance-weighted binning.
+
+Bins may cross AOR boundaries or observing gaps. Dataset-specific
+`aorBreaks_AORs<tag>.txt` files record the boundaries for fitting and are reused
+only with matching timing declarations and numerical boundaries (17-µs absolute
+tolerance). A generic `aorBreaks.txt` is never
+substituted. Review bin size and sampling near gaps,
+transits and eclipses. Median time describes sampling: a single timestamp cannot
+represent the temporal response of a nonlinear median during rapid variations.
+Model integration must account for the contributing exposure times when needed.
+
+### Correcting legacy aperture products
+
+Older products can contain **BMJD_UTC** and the compressed subarray cadence.
+Use `SPCA.timing_correction` with a complete BCD-header inventory and the
+corresponding full-resolution/binned aperture pair. The supported schemas are
+8 full-resolution columns and 16 binned columns. Run
+`python -m SPCA.timing_correction --help` for inventory and correction options.
+
+Correction first reconstructs the **historical** timestamp medians and scatter,
+checking both surviving-flux and all-row conventions. It validates bin counts,
+row order and correspondence of the flux products. Corrected bin timestamps
+then use finite full-resolution flux contributors within those same bins.
+Metadata records `historical_bin_mask`, the corrected `bin_mask`, and unchanged
+bin membership. Historical reconstruction remains separate from output timing.
+No flux, uncertainty, centroid, background, non-time NaN pattern or other
+non-time token is changed. Empty contributor sets produce NaN time statistics.
+
+For example, after creating a separate destination directory:
 
 ```bash
 python -m SPCA.timing_correction correct \
@@ -150,247 +152,42 @@ python -m SPCA.timing_correction correct \
     --output-breaks corrected/aorBreaks_AORs123.txt --audit corrected/audit.json
 ```
 
-This previews and validates the correction; add `--apply` to write it, or
-`--time-format bjd` for BJD_TDB. Build `headers.json` using the utility's
-`inventory` command with the exact science AORs and expected BCD count.
-Corrected tables declare `product_role="timing_corrected"`. Custom cleanup
-drivers should call `SPCA.timing_correction.assert_reduction_tree(path,
-recursive=True)` before modifying a tree; the guard detects corrected tables,
-root markers, and audit directories. It provides protection for callers rather
-than intercepting arbitrary filesystem deletion.
+This validates and reports without writing; add `--apply` to create separate
+products and a hash-based JSON audit. `--time-format bjd` selects BJD_TDB.
+The inventory command requires explicit science AORs and an expected BCD count.
+Already-versioned inputs, ambiguous reconstruction, existing outputs and
+in-place replacement are refused.
 
-Important compatibility changes:
+Corrected tables declare `product_role="timing_corrected"`. Standard extraction
+checks intended output paths, including relocated tables detected through their
+own metadata. Independent datasets can share a channel or technique directory;
+marked corrected export trees remain protected.
+Custom cleanup/forced-rerun drivers must call
+`SPCA.timing_correction.assert_reduction_tree(path, recursive=True)` before
+modifying a tree. This guard detects corrected tables, root markers and audit
+directories; arbitrary external filesystem operations remain the caller's
+responsibility. Re-correct original legacy files into a new destination when
+changing correction settings.
 
-* Photometry now defaults to TDB. Explicit `time_scale="utc"` selects the legacy
-  scale but does not restore the old cadence error. Companion timing is absolute,
-  rather than instrument uptime.
-* Model loaders require declared TDB products and normalize BJD_TDB to BMJD_TDB.
-  `loadCustomData` expects `t0` in BMJD_TDB; existing BJD_TDB callers must pass
-  `t0_format="bjd"`. Archive epochs require a documented TDB scale or an explicit,
-  independently verified `t0_scale="tdb"` assertion.
-* Preloaded photometry arrays require matching `input_time_metadata`; this
-  declares their existing convention and does not convert their values.
-* Model fitting requires validated `aorBreaks_AORs<tag>.txt` boundaries for the
-  selected dataset; it never falls back to potentially stale `aorBreaks.txt`.
-  Reusing preloaded arrays requires matching timing metadata rather than file
-  existence alone.
+## Extraction methods and channels
 
-Run the self-contained, offline package tests with:
+Ch1/ch2 have established use. Ch3/ch4 aperture extraction has synthetic coverage
+and limited real-data checks: four BCDs and two short extractions, with complete
+science reductions and detector-systematics validation still outstanding.
+The supported paths below use native pixels (`oversamp=False`).
 
-```bash
-python -m pip install -e '.[dev,download]'
-python -m pytest tests
-```
-
-The tests use synthetic images plus six small real header records and cached
-geometric Horizons vectors. No external science archive is required. Optional
-local-image checks accept arbitrary targets through
-`python tools/validate_irac_samples.py --help`; the cached ephemeris comparison
-is documented by `python tools/check_irac_ephemeris.py --help`.
-
-## Programmatic Spitzer/IRAC downloads
-
-Install optional archive dependencies (existing-file users do not need them):
-
-```sh
-python -m pip install -e ".[download]"
-python Download_Spitzer_Data.py --help
-```
-
-Use [Download_Spitzer_Data.ipynb](./Download_Spitzer_Data.ipynb) for interactive
-discovery, metadata inspection, AOR selection, preview, and explicit downloading.
-Its default settings do **not** download FITS files. The thin
-[Download_Spitzer_Data.py](./Download_Spitzer_Data.py) CLI and notebook share
-[SPCA/spitzer_download.py](./SPCA/spitzer_download.py).
-
-**Completeness limitation:** IRSA's SIA service has no per-AOR file inventory,
-so a download is never reported as complete by itself. Files are found when their
-footprints overlap the search circle during the AOR. Channels 1 and 3 view one
-field and channels 2 and 4 an adjacent one, so frames from the pair that never
-covers the target are not retrieved; for cryogenic full-array AORs this
-typically yields only the two on-target channels. Large SIA queries can take
-several minutes (a one-year window took about 25 minutes for WASP-12b). IRSA
-TAP has no `spitzer_sha` ObsCore rows, and the historical SHA DataService is no
-longer available (HTTP 404), so it is not used. Use `--compare`/`--reference`
-(below) to check a plan against an independent listing. An unavailable service
-raises an error, never a successful empty inventory. The workflow does not
-invent download URLs or use SHA's browser-launching API.
-
-### Discover, preview, and explicitly download
-
-Coordinate searches bypass SIMBAD/name resolution entirely. Decimal-degree
-coordinates are also accepted. Quote sexagesimal values; negative declinations
-can be supplied with `--dec=-12:34:56`. A target name is only resolved when
-coordinates are absent, so resolver outages do not affect coordinate searches.
-
-```sh
-# Metadata only: candidates in IRAC channels 1--4, no FITS downloads.
-python Download_Spitzer_Data.py \
-    --target WASP-12b --ra 06:30:32.797 --dec +29:40:20.26 \
-    --channels 1 2 3 4 --output /path/to/WASP-12b/campaign
-
-# Optional cryogenic-window metadata search (end is inclusive UTC).
-python Download_Spitzer_Data.py \
-    --ra 06:30:32.797 --dec +29:40:20.26 --channels 3 4 \
-    --start 2008-01-01 --end 2008-12-31T23:59:59.999
-
-# Substitute verified AORKEYs from discovery; this saves a plan but no FITS.
-python Download_Spitzer_Data.py \
-    --ra 06:30:32.797 --dec +29:40:20.26 --aor AORKEY1 AORKEY2 --channels 3 4 \
-    --output /path/to/WASP-12b/cryogenic_campaign --preview
-
-# Explicitly download or restart the saved plan.
-python Download_Spitzer_Data.py \
-    --manifest /path/to/WASP-12b/cryogenic_campaign/download_plan.ecsv --download
-```
-
-`--aor` and `--pid` accept lists. For example, `--pid 50517 50759 70060 90186`
-can be combined with a positional search; these are candidate programs, **not
-verified assertions that every AOR targets WASP-12b**. Criteria intersect,
-while values within a list are alternatives. A later `--aor ... --preview` run
-repeats the positional search (coordinates are still required with SIA) and
-keeps only the listed AORs.
-
-For WASP-12b, the 2008 channel 3/4 search above returned (from live archive
-metadata) AOR 28566016 (PID 50759, 2008-10-29, ch4, 1560 BCDs) and AOR 28578560
-(PID 50517, 2008-11-03, ch3, 1697 BCDs), plus short mapping AORs 28250112 and
-28312320 that list no BCDs (reported with a warning). AOR 28566016 also holds
-1560 channel-2 BCDs (per its archive quality report), which a `--channels 3 4`
-search intentionally does not plan; `--compare` lists such channels. Discovery
-and planning each re-query whole AORs, so previewing a multi-hour staring AOR
-takes minutes.
-
-Cryogenic IRAC channel pairs 1/3 and 2/4 view different fields. Requested
-channels absent from discovery are informational, not completeness warnings;
-planning still fails if a discovered AOR/channel loses its science BCD links.
-Shared calibration files are retained separately under each science AOR's
-channel directory, even when their original archive URL is identical. Repeated
-calibration links within an AOR/channel are deduplicated by local product
-identity: their dates, time bounds, pointing, PID, mode, and size estimates
-describe the referring observations and can differ. Calibration rows retain a
-deterministic representative association, combined time bounds, and the largest
-size estimate; these are not authoritative calibration-file metadata. Discovery
-summaries and expansion hints prefer science exposures (and AOR-level time
-bounds), not calibration associations. Different URLs targeting the same local
-file remain errors.
-
-#### How files are found
-
-`Irsa.query_sia(collection="spitzer_sha")` returns **one record per archive
-file**, matching every file whose image footprint overlaps the search circle
-(`--radius`, default 0.5 arcmin); dithered or mapped frames whose centers lie
-arcminutes away are therefore still found. The AORKEY is the record's
-hexadecimal `obs_id`, the PID is the trailing number of `proposal_id`, and the
-observing mode comes from `instrument_keywords` and the frame size. Each
-selected AOR is then re-queried over its own time span (`--expansion-radius`,
-default 0.5 arcmin), so a date filter selects whole AOR/channel observations
-rather than clipping frames from them. A date-only bound means midnight UTC.
-
-A date filter may catch only the beginning of a long AOR (e.g. a 32-hour phase
-curve), so the AOR's full start/end is established before planning, in order
-of preference, and recorded per AOR as `time_coverage`:
-
-- `aor_metadata`: the time span of the AOR-level archive records (the AOR
-  `DOC`/README files) returned by SIA;
-- `qa_report`: the observation start/end in the archive's
-  `QualityAnalysis_<AOR>.README` (a small text download);
-- `gap_search` (warning): neither is available, so the search is extended until
-  0.5 days beyond the first/last frame contain no further frames of the AOR;
-- `unbounded` (warning): frames continue beyond 10 days, so the search stops;
-- `full_mission`: the AOR was searched without a time constraint.
-
-SIA has no PID or AOR parameter, so those filters are applied to positional
-results. IRSA silently truncates SIA results at the row limit, so any query
-reaching it is split in time and repeated until no part is truncated.
-
-Products are classified by their archive path
-(`.../r<AOR>/chN/<bcd|cal|raw|pbcd>/<file>`), not by IVOA `calib_level` (all
-SHA files report level 2). Which `bcd/` and `cal/` FITS files are downloaded
-depends on the product profile (below). `cal/` files are stored under the
-science AOR even when the archive serves them from a calibration AOR. Level 0
-`raw/`, Level 2 `pbcd/`, logs, and AOR-level documents are never downloaded;
-the preview reports every unplanned file, counted by reason.
-
-#### Product profiles and science-image versions
-
-Choose what to download with `--profile` (Python: `profile=`) and which
-science-image version to analyze with `--science-product` (`science_product=`).
-The default is `spca` with `bcd`, the products SPCA's photometry actually uses:
-
-| Profile | Requested products |
-| --- | --- |
-| `spca` (default) | Selected science images and `cal/*_sdark.fits` for optional `addStack=True` correction-stack lookup |
-| `science-qa` | Everything in `spca`, plus same-exposure uncertainty (`_bunc` for BCD, `_cbunc` for CBCD) and `_bimsk`, `_imsk`, `_brmsk` masks |
-| `archive` | Opt-in: all supported `bcd/` and `cal/` FITS products, including both BCD and CBCD |
-
-`--science-product` is `bcd` (default) or `cbcd`. BCD and CBCD are alternative
-processing versions of the same exposure: only the selected version is
-labelled and counted as `science`; in `archive` downloads the other version is
-kept as `ancillary`. If the selected version is unavailable, planning fails;
-the other version is never substituted. Neither `spca` nor `science-qa`
-requests `_scmsk.fits`, subarray summary products (`_unc2d`, `_msk2d`,
-`_cov2d`, etc.), or other calibration files, and `science-qa` skips orphan QA
-files without a selected same-stem science image.
-See the [IRAC product table](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/31/).
-
-Recommended workflows:
-
-```sh
-# Typical SPCA analysis (default spca profile, BCD images):
-python Download_Spitzer_Data.py --ra 06:30:32.797 --dec +29:40:20.26 \
-    --aor 28578560 --channels 3 --output /path/to/campaign --preview
-# Inspect the archive uncertainty and mask products as well:
-python Download_Spitzer_Data.py ... --profile science-qa --preview
-# Artifact-corrected images instead of BCDs:
-python Download_Spitzer_Data.py ... --science-product cbcd --preview
-# Complete archival Level 1 copy:
-python Download_Spitzer_Data.py ... --profile archive --preview
-```
-
-The notebook exposes `PROFILE` and `SCIENCE_PRODUCT` beside the other settings.
-Python callers use `plan_download(..., profile="spca", science_product="bcd")`.
-
-Plans record `profile` and `science_product`; plans without them are rejected
-and must be regenerated. Inventories record the latest selection per
-AOR/channel in `product_selection` and relabel files from it whenever they are
-written or summarized, so counts always refer to the selected version.
-Comparison uses that selection to report deliberately excluded products as
-`not_requested`, not missing. `--manifest` executes a saved plan's selection;
-re-plan to change it. Switching profiles or science versions never removes or
-overwrites existing files or inventory rows: verified files are reused,
-newly selected products are downloaded, and manual untracked files remain
-protected. Batched checkpoints and journal recovery work for every profile.
-
-Photometry defaults to **exact** `*_bcd.fits` matches, never the old
-`*bcd.fits` pattern that also matched CBCDs. Use
-`get_fnames(..., science_product="cbcd")`,
-`prepare_images(..., science_product="cbcd")`, or the aperture, PSF, PLD, and
-companion `get_lightcurve(..., science_product="cbcd")` APIs to choose CBCD.
-Both image versions may remain on disk, but are never jointly loaded.
-
-#### IRAC channels, observing modes, and extraction
-
-Ch1/ch2 have established legacy use. Ch3/ch4 extraction and full-frame WCS
-handling have been extended, with more limited real-observation validation.
-The table describes implemented paths with `oversamp=False`; implementation
-and synthetic coverage do not establish scientific calibration of every case.
-
-| Component | Implemented geometry and channel handling | Validation and practical limits |
+| Method | Geometry and settings | Validation limits |
 | --- | --- | --- |
-| Aperture photometry | Ch1–ch4, 32×32 subarray frames and WCS crops of 256×256 full frames | Synthetic extraction, centroiding, binning and aperture selection across all four channels; recent real ch3/ch4 checks used four BCDs and two short extraction runs, not complete eclipse reductions. |
-| PSF photometry | Both geometries through shared preparation; channel naming/header conversion for ch1–ch4 | Fits a normalized 2D Gaussian in a fixed central 5×5 window. Native-pixel synthetic extraction/output tests exist; full-frame and ch3/ch4 science time series still need method-specific validation. |
-| PLD | Both geometries through shared preparation; ch1–ch4 paths | Extracts native-pixel 3×3 or 5×5 stamps centered at `(15,15)`. Synthetic output tests exist; full-frame and ch3/ch4 PLD science performance is insufficiently validated. |
-| Companion extraction | Specialized legacy two-source subarray routine; accepts channel-specific paths | Full-frame extraction explicitly raises `NotImplementedError`. Narrow source initialization/bounds require review for a new field; ch3/ch4 companion extraction has not been established by the recent tests. |
-| Frame-position diagnostics | Selections consisting entirely of 64×32×32 cubes | Other geometries return no exclusions. Overlapping/interleaved cubes are refused. An empty result for full frames is a skipped diagnostic, not evidence of clean data. |
-| Timing and model inputs | Shared BMJD_TDB timing for all channels; method-specific saved columns | Real headers and cached ephemerides check timing geometry; model loaders validate declared TDB. These checks do not validate a complete astrophysical fit or detector model. |
+| Aperture | Ch1–ch4 subarrays and full-frame WCS crops; fixed/moving centroids, radius/edge search, RMS ranking | Synthetic tests cover all channels; limited real ch3/ch4 aperture checks |
+| PSF | Shared image preparation; normalized 2D Gaussian in a fixed central 5×5 window | Synthetic output checks; full-frame and ch3/ch4 science series need validation |
+| PLD | Shared preparation; fixed native 3×3 or 5×5 stamps centered at `(15,15)` | Synthetic output checks; full-frame and ch3/ch4 science performance needs validation |
+| Companion | Specialized legacy two-source subarray extraction; caller-selected output directory | Full frames unsupported; initialization/bounds and ch3/ch4 performance need review |
+| Frame diagnostics | Frame-position exclusions for nonoverlapping 64×32×32 cubes | Other geometries skip this diagnostic |
 
-All four extraction APIs select BCD or CBCD explicitly; they do not produce
-CBCD artifact corrections themselves. Product-selection routing is covered
-synthetically. The recent small real ch3/ch4 checks used BCDs, and do not
-establish CBCD science performance or equivalence of the processing versions.
+### Full-frame observations
 
-Full-frame IRAC BCDs (256×256, one exposure per file) require explicit target
-coordinates. Pass a scalar Astropy `SkyCoord` or an `(RA, Dec)` pair in degrees:
+Full-frame BCDs contain one 256×256 image. Supply a scalar Astropy `SkyCoord` or
+an `(RA, Dec)` pair in degrees:
 
 ```python
 from SPCA.Photometry_Aperture import get_lightcurve
@@ -403,222 +200,175 @@ get_lightcurve(
 )
 ```
 
-`prepare_images(..., target_coord=...)` accepts the same setting. In
-`Everything_Photometry.py`, set the planet's entry in `target_coords`.
-For each AOR, the first selected BCD's celestial WCS (including distortion)
-defines a fixed 32×32 crop, placing the target between zero-based stamp pixels
-15 and 16 in each axis. Later exposures use those same detector pixels;
-the existing centroids track pointing drift. Crops use NumPy `[y, x]` ordering
-and must fit entirely within the original image; missing coordinates, missing
-celestial WCS, and crops crossing the image edge raise errors. Other-star
-masks and full-frame correction stacks use the same crop offsets.
+`Everything_Photometry.py` exposes these coordinates through `target_coords`.
+The first selected BCD's distorted celestial WCS defines a fixed 32×32 crop for
+each AOR, placing the target between zero-based pixels 15 and 16. Later frames
+retain those detector pixels while centroids track pointing drift. Crops use
+NumPy `[y, x]` order and must fit entirely on the detector. Nearby-star masks
+and full-frame correction stacks use the same crop offsets. Full-frame data
+require `ignoreFrames=[]` or `None`; that option selects positions within
+subarray cubes. Other positive cube lengths load, but diagnostics require 64.
 
-Subarrays retain their 32×32 stamps; the usual 64-frame cubes use the repaired
-per-frame timing. The loader can handle other positive cube lengths, but frame
-diagnostics require exactly 64. Full-frame extraction requires
-`ignoreFrames=[]` (or `None`). See [timing and accuracy](#irac-timing-and-legacy-light-curves)
-for the nominal full-frame midpoint and the limits of target-direction timing.
+### Products and limitations
 
-Aperture photometry offers fixed/moving centroids, a radius/edge-method search,
-and RMS ranking; `onlyBest=True` saves the winning pair when a finite ranking
-exists. Its `centroid_bounds` and background-exclusion `background_bounds` are
-configurable. Defaults are shared across channels: wider Si:As PSFs and pointing
-drift require users to assess these windows. PSF/PLD high-level calls retain
-fixed source windows. Background subtraction and optional `addStack` lookup
-provide extraction operations, without new detector-specific calibration.
+New aperture, PSF and PLD directories use `ch1`–`ch4` prefixes, for example
+`ch1ExactCircular2_3_movingCentroid` or `ch2PLD_3x3`. Existing ch1/ch2 directories
+such as `3umExactCircular2_3_movingCentroid` and `4umExactCircular2_1` remain
+readable without renaming. Aperture ranking uses exact paths recorded in
+`bestPhOption.txt` and restricts selection to the requested dataset. Automatic
+PSF/PLD lookup accepts both conventions and refuses ambiguity when both contain
+the same dataset; use explicit product paths to select a copy. No wavelength
+aliases are introduced for ch3/ch4.
 
-Aperture tables retain 8 unbinned columns and 16 binned columns; the
-unbinned table does not save the internally computed aperture-flux uncertainty.
-PSF tables have 7/14 columns; PLD saves pixel vectors with time/background
-columns; companion unbinned tables also include flux uncertainty. Binned `Flux std`
-is empirical scatter, not a propagated error on the mean. Model loaders retain
-their method-specific schemas and require matching conventions when combining
-products. Inspect flux, masks, centroids and widths before scientific fitting.
-Use separate analysis output directories when comparing target coordinates
-or crop settings, since output filenames retain their existing structure.
+`onlyBest=True` saves the aperture winner when a finite ranking exists.
+New datasets may share technique directories, but existing science pairs cannot
+be silently replaced. Use a separate analysis directory for another reduction,
+processing version, target direction or crop configuration. No package cleanup
+routine renames or removes legacy directories.
 
-All four IRAC channels use their own header calibration values and retain the
-historical directory prefixes `3um`, `4um`, `5um`, and `8um` for ch1–ch4. Channel
-support does not supply new corrections for Si:As ramps, persistence, intrapixel effects,
-[banding](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/40/),
-or [aperture/calibration effects](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/17/).
-Source/background windows are extraction settings, not calibrated aperture
-corrections. The existing automatic PHOENIX brightness-temperature approximation
-supports only ch1/ch2 and explicitly refuses ch3/ch4. Analysis drivers using
-that step need an independently supplied stellar-response treatment for ch3/ch4;
-extraction support does not imply a ready-to-run complete analysis for them.
+Aperture tables have 8/16 full/binned columns; the full table omits the internal
+aperture-flux uncertainty. PSF tables have 7/14 columns; PLD tables contain pixel
+vectors plus time/background columns. Companion full tables include flux
+uncertainty. Binned `Flux std` is empirical population scatter, without a formal
+uncertainty on the median. Model loaders retain method-specific schemas and
+require matching time rows when combining products.
 
-Synthetic full-frame and subarray regressions can be run without science data:
+All channels use their own header calibration values. Aperture centroid and
+background-exclusion windows are configurable; assess them for broad Si:As PSFs
+and pointing drift. Detector ramps, persistence, intrapixel sensitivity,
+[banding](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/40/)
+and [aperture corrections](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/17/)
+require observation-specific assessment.
+
+The automatic stellar brightness-temperature approximation uses
+[PHOENIX-ACES HiRes files](https://phoenix.astro.physik.uni-goettingen.de/) covering
+approximately 0.05–5.5 µm. They cannot span the ch3/ch4 response functions.
+Extending this calculation requires stellar spectra covering those complete
+bandpasses and response integration. This limit belongs to the selected files;
+other PHOENIX products may have different coverage. The existing ch1/ch2
+calculation compares spectral sample sums over broad 3–4/4–5 µm windows with
+Planck spectra. It checks that loaded spectra span those windows and have finite
+samples, but remains an approximation without IRAC response weighting or
+wavelength quadrature. Ch3/ch4 analysis drivers that invoke it raise an error.
+
+**Oversampling is currently nonfunctional.** Leave `oversamp=False` until the
+interpolator's runtime and axis-order defects are fixed and scientifically
+validated. PSF fits also assume unit sampling scale; the separate legacy
+companion interpolator remains unvalidated. Oversampling caches identify the
+full archive stem, scale, prepared pixels and masks; malformed entries regenerate,
+and old sequence-number caches are ignored. Any interpolator repair must bump
+`OVERSAMPLE_CACHE_VERSION` to prevent reuse of old results.
+
+Image preparation derives masks from science pixels and does not consume
+archive uncertainty/mask companion files. `addStack=True` selects external
+`Calibration/` correction stacks using each AOR's sky-dark filename. The
+sky-dark pixels are not used, and SPCA does not supply the external stacks.
+
+## Programmatic Spitzer/IRAC downloads
+
+Install `.[download]` and use `Download_Spitzer_Data.ipynb` or
+`python Download_Spitzer_Data.py --help`. Both share `SPCA/spitzer_download.py`.
+The default performs metadata discovery only. Explicit coordinates bypass name
+resolution; decimal degrees and quoted sexagesimal values are accepted.
+Negative declinations can use `--dec=-12:34:56`.
 
 ```bash
-MPLBACKEND=Agg python -m pytest tests/test_full_frame_photometry.py tests/test_aperture_masks.py tests/test_photometry_products.py -q
-```
-
-Oversampling caches are named after each image's full archive filename stem
-(AOR, exposure, and BCD/CBCD version), the oversampling scale, and a SHA-256
-digest of the prepared image just before oversampling. That digest reflects
-correction stacks, ignored frames, star masks, and the science file contents,
-so changing any of them regenerates the cache rather than reusing a stale one.
-Caches are written atomically; unreadable or malformed caches are regenerated.
-Older sequence-number-only caches (e.g. `Oversampled/0002.pkl`) are ignored and
-can be deleted, as can caches for settings you no longer use. The `Oversampled/`
-directory is created automatically when caches are saved.
-
-**Known limitation:** `oversamp=True` is currently nonfunctional. The existing
-`oversampling()` implementation fails at runtime and, once that is fixed, its
-interpolation grid transposes the image; it needs separate scientific
-validation before use, so leave `oversamp=False` (the default). When it is
-corrected, `OVERSAMPLE_CACHE_VERSION` in `SPCA/Photometry_Common.py` must be
-incremented so caches from the earlier algorithm are never reused.
-Cache tests use a substitute interpolator and do not validate this routine.
-The PSF high-level call additionally fixes the fitting scale to one; the legacy
-companion interpolator is separate and unvalidated. These defects/validation
-gaps require separate work; use native pixels for the supported paths above.
-Use separate analysis output directories for separate processing-version runs.
-
-SPCA's current image preparation derives masks from the science image and
-does not consume archive uncertainty/mask files. `addStack=True` selects
-external correction stacks from `Calibration/` using each AOR's downloaded
-sky-dark **filename**; the sky-dark's pixels are not read. The `spca` profile
-keeps these small lookup files rather than recording their names as metadata:
-each AOR/channel typically references one sky-dark the size of a single BCD
-frame, and real files keep downloaded trees identical to extracted SHA ZIPs
-and manually organized directories. The `spca` profile does not supply the
-external correction stacks.
-Missing uncertainty/mask counts in inventory summaries are association counts,
-not evidence of incomplete `spca` or science-only downloads.
-
-#### Checking a plan against an independent listing
-
-`--compare` checks the planned `bcd/` filenames of each AOR/channel against the
-IRSA archive's own directory listing of `r<AOR>/chN/bcd/` and the
-processed-frame count in the AOR's quality report (metadata only; no FITS data).
-`--reference` instead compares against SHA ZIP files or extracted directories
-you obtained independently, e.g. from the SHA web interface:
-
-```sh
+# Discover candidate observations; dates are UTC.
 python Download_Spitzer_Data.py \
-    --ra 06:30:32.797 --dec +29:40:20.26 --aor 28578560 --channels 3 \
-    --start 2008-11-03 --end 2008-11-04 --output /path/to/campaign --compare
-python Download_Spitzer_Data.py ... --reference /path/to/SHA_download.zip
+    --ra 06:30:32.797 --dec +29:40:20.26 --channels 1 2 3 4 \
+    --start 2008-01-01 --end 2008-12-31T23:59:59.999 \
+    --output /path/to/campaign
+
+# Preview selected AORKEYs from discovery without transferring FITS files.
+python Download_Spitzer_Data.py \
+    --ra 06:30:32.797 --dec +29:40:20.26 --aor AORKEY1 AORKEY2 \
+    --channels 1 2 --output /path/to/campaign --preview
+
+# Download or restart the saved plan.
+python Download_Spitzer_Data.py \
+    --manifest /path/to/campaign/download_plan.ecsv --download
 ```
 
-```python
-from SPCA.spitzer_download import compare_inventory
+`--pid`, `--aor`, dates and channel filters intersect; values within a list are
+alternatives. Date filters select whole overlapping AORs. Discovery and planning
+expand AOR time coverage, which can take minutes for long observations.
+A saved manifest fixes its profile and science version; regenerate the plan
+to change either selection.
 
-comparison = compare_inventory(plan)  # or compare_inventory(plan, "sha.zip")
-print(comparison.meta["details"], comparison.meta["unplanned_channels_with_data"])
-```
+### Product selection
 
-The result (also saved as `inventory_comparison.ecsv`) reports missing files
-(in the reference but not planned), extra files (planned but not in the
-reference), intentionally excluded files (logs, unsupported, or `not_requested` products
-outside the selected profile), channels holding data that were not planned, and an
-`agreement` of `match`, `match_without_qa_count`, `mismatch`, or
-`not_in_reference`. Only `bcd/` files are compared, because `cal/` files are
-served from separate calibration AORs. Science counts (`reference_science`,
-`planned_science`) refer only to the selected science version. A saved
-`download_inventory.ecsv` can also be compared; it records the product
-selection for each AOR/channel, so an `spca` download does not report
-uncertainty/mask files as missing. The
-archive directory listing is an HTML
-index intended for browsing, not a versioned API, so an unparseable listing is
-an error rather than an empty match.
+| Profile | Requested products |
+| --- | --- |
+| `spca` (default) | Selected science images and `cal/*_sdark.fits` for optional correction-stack lookup |
+| `science-qa` | Above plus same-exposure uncertainty and supported mask products |
+| `archive` | Supported Level 1 `bcd/` and `cal/` FITS products, including both BCD and CBCD |
 
-### Verification, storage, and the next processing step
+`--science-product bcd` is the default; `cbcd` selects artifact-corrected images.
+Only the selected version counts as science. Its absence is an error. SPCA
+keeps alternate versions separate and does not generate CBCD artifact corrections.
+The extraction APIs accept `science_product="cbcd"` for this choice. Small real
+ch3/ch4 checks used BCDs; CBCD science equivalence has not been established.
+See the [IRAC product table](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/31/).
 
-Downloads stream with one overall tqdm progress bar, configurable
-`--timeout`/`--retries`, temporary files, and atomic completion. Interrupted
-files restart from zero. HTTP lengths are checked and FITS structure is
-validated without rewriting data. SIA sizes
-(`access_estsize`) are rounded estimates used only for preview totals. Local
-SHA-256 hashes, computed while streaming, verify previously completed files
-before skipping them; IRSA supplies **no archive checksums**. The manifest and
-inventory are rewritten atomically every 100 files or 30 seconds
-(`download_plan(..., checkpoint_files=, checkpoint_seconds=)`) and on
-completion, failure, or interruption, so AORs with thousands of files do not
-rewrite them per file. Between checkpoints, each completed file's path, source
-URL, size, and SHA-256 are appended to `download_journal.jsonl` before the file
-is moved into place; after a hard kill or power failure, the next run adopts
-journaled files whose size and hash still match, so they are neither downloaded
-again nor treated as untracked. Both 2D full-frame images and 3D subarray
-cubes are preserved byte-for-byte. Files are written directly into the SPCA
-layout, so no duplicate ZIP/FITS storage is kept. Existing files the downloader
-did not record (in `download_inventory.ecsv`, or in the journal with matching
-size and hash) are never overwritten by default:
-they are marked `conflict` in the manifest and the run stops with an error
-after the other files finish. Move them aside or pass `--overwrite-untracked`
-(`download_plan(..., overwrite_untracked=True)`). Corrupted files recorded in
-the inventory are still repaired automatically.
+Raw/Level 2 data, logs and unsupported products are excluded and reported in the
+preview. QA selection skips orphan files without corresponding selected science
+images. Shared calibration products are stored under each associated science
+AOR. Changing profile/version preserves verified existing files and their
+inventory records.
 
-The campaign directory contains:
+### Completeness and verification
 
-- `discovered_observations.ecsv`: candidate AOR/channel metadata (CLI discovery).
-- `download_plan.ecsv`: original links, estimated sizes, local paths, and
-  per-AOR time coverage.
-- `download_manifest.ecsv`: current transfer status and failure details.
-- `download_inventory.ecsv`: actual files, original source URLs, sizes, and hashes.
-- `download_journal.jsonl`: transient per-file provenance since the last
-  inventory checkpoint (removed after a clean run).
-- `download_completeness.ecsv`: local per-AOR/channel product counts and
-  missing uncertainty/mask associations; archive completeness stays unverified.
-- `inventory_comparison.ecsv`: optional `--compare`/`--reference` results.
-- `data/chN/r########/chN/bcd/`: science/associated files in SPCA's existing layout.
+SIA finds exposures whose footprints overlap the search circle. IRAC ch1/ch3
+share one field and ch2/ch4 another, so a positional search can omit the adjacent
+field. Successful transfer alone leaves archive completeness unverified.
+Use `--compare` for the archive directory listing and quality-report counts,
+or `--reference /path/to/SHA_download.zip` for an independently obtained ZIP or
+directory. Comparisons cover `bcd/` products and report missing, extra,
+intentionally excluded and unplanned-channel files. An unparseable listing is
+an error. Optional QA association counts do not establish completeness.
 
-Preview summaries show estimated bytes for the chosen profile, files of
-unknown size, science-image counts, and available PID/date/mode metadata.
-Discovery reports unique `science_exposures`, per-version `bcd_files` and
-`cbcd_files`, and `archive_bytes` for all returned Level 1 files.
-`inventory_summary` counts science, uncertainty, mask, and ancillary files per
-**AOR/channel**. Successful transfer means only that the returned products were
-downloaded: by itself this leaves dataset
-**completeness unverified**, even if science/uncertainty/mask counts match.
-The report also counts selected science images lacking same-stem
-uncertainty/mask files (`images_without_uncertainty`/`images_without_mask`;
-expected for the default `spca` profile);
-this is an association check; use `compare_inventory` for a listing comparison.
-Ancillary associations are not inferred by inventing filename-based download
-URLs. Check the inventory and archive documentation before scientific analysis.
+Transfers validate HTTP lengths and FITS structure without rewriting image data.
+Local SHA-256 hashes verify completed downloads; IRSA supplies no archive
+checksums. Interrupted files restart from zero. Atomic inventory checkpoints
+and a per-file journal recover verified progress after interruption. Untracked
+existing files cause a conflict; replacing them requires
+`--overwrite-untracked`. Corrupted inventory-tracked files are repaired.
 
-After a successful CLI download, directory setup runs automatically; notebook
-users run its final setup cell. Alternatively, call `make_directory_structure`
-from [SPCA/directory_structure.py](./SPCA/directory_structure.py) on the campaign
-root. Configure `Everything_Photometry` with that root and the chosen
-channel/AORs. The AOR snippet is not an epoch filter: do not automatically
-analyze different campaigns together.
+Campaign bookkeeping includes discovery, plan, manifest, inventory and
+completeness ECSV files, a transient `download_journal.jsonl`, and an optional
+`inventory_comparison.ecsv`. Science files are written directly to
+`data/chN/r########/chN/bcd/`. CLI downloads run directory setup automatically;
+notebook users run the final setup cell. Configure `Everything_Photometry` with
+the campaign and selected AORs afterward. An AOR prefix alone is not a date filter.
 
-Offline regression tests require no IRSA access:
-
-```sh
-python -m unittest discover -s tests
-```
-
-Official references: [astroquery IRSA](https://docs.astropy.org/projects/astroquery/en/latest/ipac/irsa/irsa.html),
-[IRSA APIs](https://irsa.ipac.caltech.edu/voapi.html),
+References: [IRSA APIs](https://irsa.ipac.caltech.edu/voapi.html),
 [image APIs](https://irsa.ipac.caltech.edu/docs/program_interface/api_images.html),
 [SHA knowledgebase](https://irsa.ipac.caltech.edu/docs/knowledgebase/spitzer_sha.html),
 and [IRSA tutorials](https://caltech-ipac.github.io/irsa-tutorials/).
 
-## Contributions
+## Validation
 
-[Lisa Dang](https://github.com/lisadang27) contributed the initial code and idea for SPCA, and wrote much of the photometry and fitting routines, as well as the polynomial and PLD decorrelation methods.
+Tests run offline using synthetic images, six real header records and cached
+Horizons vectors. They cover timing, correction safeguards, channel routing,
+WCS extraction, aperture masks and download bookkeeping. They do not establish
+full ch3/ch4 science calibration. Optional local-data tools accept arbitrary
+targets: `python tools/validate_irac_samples.py --help` and
+`python tools/check_irac_ephemeris.py --help`.
 
-Both authors worked extensively to debug the code and simplify the user experience.
+## Contributors and acknowledgements
 
-[Taylor James Bell](https://github.com/taylorbell57) further generalized and streamlined SPCA, allowing it to be run quickly and easily for any given planet with minimal effort. Taylor also contributed most of the documentation, and the GP decorrelation method.
+[Lisa Dang](https://github.com/lisadang27) created SPCA and developed much of its
+photometry, fitting, polynomial and PLD routines.
+[Taylor James Bell](https://github.com/taylorbell57) generalized the pipeline,
+improved its documentation and contributed GP decorrelation. Both authors
+worked on debugging and usability. We thank Joel Schwartz for BLISS guidance,
+Dylan Keating for testing, and Antoine Darveau-Bernier for the
+[Exoplanet Archive parameter-selection code](https://github.com/AntoineDarveau/masterfile).
 
-## Acknowledgements
+## License and citation
 
-We thank Joel Schwartz for his aid in writing out BLISS decorrelation method. We also thank Dylan Keating for alpha testing SPCA. We thank Antoine Darveau-Bernier for writing code to parse through the Exoplanet Archive data and select the best constrained value for each parameter in the database (code can be found [here](https://github.com/AntoineDarveau/masterfile)).
-
-## License & Attribution
-
-Copyright © 2018-2020 Lisa Dang & Taylor James Bell.
-
-SPCA is free software made available under the GPL3 License. For details
-see the [LICENSE](https://github.com/lisadang27/SPCA/blob/master/LICENSE).
-
-If you make use of SPCA in your work, please cite the Dang et al. (2018) paper that was the first to use this pipeline
-[arXiv](https://arxiv.org/abs/1801.06548),
-[ADS](https://ui.adsabs.harvard.edu/abs/2018NatAs...2..220D),
-[BibTeX](https://ui.adsabs.harvard.edu/abs/2018NatAs...2..220D/exportcitation>).
+Copyright © 2018–2020 Lisa Dang and Taylor James Bell. SPCA is distributed under
+the [GPL3 License](./LICENSE). Please cite
+[Dang et al. (2018)](https://arxiv.org/abs/1801.06548) when using SPCA
+([ADS](https://ui.adsabs.harvard.edu/abs/2018NatAs...2..220D),
+[BibTeX](https://ui.adsabs.harvard.edu/abs/2018NatAs...2..220D/exportcitation)).

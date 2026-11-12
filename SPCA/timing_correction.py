@@ -22,6 +22,9 @@ from .irac_timing import exposure_midpoints, frame_count, read_timing, timing_me
 
 INVENTORY_FORMAT = "spca-irac-headers-v1"
 TIME_ATOL_DAYS = 2e-10  # 17 microseconds; allows text/float rounding, not bad cadence
+# Full/binned tables must reproduce the same median flux to text precision;
+# 1e-10 relative permits numerical serialization, far below photometric noise.
+FLUX_RTOL = 1e-10
 HEADER_KEYS = (
     "NAXIS",
     "NAXIS1",
@@ -197,6 +200,7 @@ def _require_close(actual, expected, label, atol=TIME_ATOL_DAYS):
 
 
 def _bin_times(times, good, size):
+    """Reproduce historical median/scatter and fixed row-bin membership."""
     rows = []
     for start in range(0, len(times), size):
         values = times[start : start + size][good[start : start + size]]
@@ -261,10 +265,14 @@ def correct_products(
     and its channel/AOR. Source timestamps must match at 2e-10 days, with zero
     relative tolerance. Bin masks are reconstructed from timestamps/scatter
     and validated against the corresponding fluxes; ambiguities are errors.
+    After historical validation, output median times and population scatter
+    use the saved finite full-resolution flux contributors in the original
+    bins. Both mask conventions are recorded. Empty contributor sets have
+    NaN time statistics, even if the historical all-row time was finite.
 
     Default output is BMJD_TDB. A target adds a header-state differential
     direction correction; omission explicitly retains the header reference.
-    BJD output changes only the format. Non-time tokens and NaN masks are
+    BJD output changes only the format. Non-time tokens, including their NaN masks, are
     preserved byte-for-byte. --apply requires distinct, nonexistent outputs
     and an audit path; an existing output is never implicitly resumed/replaced.
     Audits record conventions, header/code/product hashes and correction sizes.
@@ -317,14 +325,18 @@ def correct_products(
         # Validate that these are corresponding full/binned flux products.
         flux_medians = _bin_times(data[:, 0], good_flux, bin_size)[:, 0]
         finite = np.isfinite(bins[:, 0])
-        if not np.allclose(bins[finite, 0], flux_medians[finite], rtol=1e-10, atol=0):
+        if not np.allclose(
+            bins[finite, 0], flux_medians[finite], rtol=FLUX_RTOL, atol=0
+        ):
             raise ValueError("Binned flux does not match full-resolution product")
-        metadata["bin_mask"] = mask_policy
-        metadata["binning"] = (
-            "median of surviving flux timestamps"
-            if mask_policy == "finite_flux"
-            else "median of all legacy time rows, independent of flux masks"
-        )
+        # Reconstruction above validates the original convention, including
+        # its scatter. Output timing always follows the saved flux contributors;
+        # no rebinning, photometry changes, or new rejection decisions occur.
+        corrected_bins = _bin_times(new, good_flux, bin_size)
+        metadata["historical_bin_mask"] = mask_policy
+        metadata["bin_mask"] = "finite_flux"
+        metadata["binning"] = "median of timestamps of surviving flux samples"
+        metadata["bin_membership"] = "unchanged consecutive full-resolution rows"
         bin_delta = (corrected_bins[:, 0] - format_offset - bins[:, 2]) * 86400
         outputs.append(
             (

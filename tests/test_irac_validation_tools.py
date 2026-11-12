@@ -12,6 +12,9 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def test_cached_horizons_checker_matches_explicit_header_ids():
+    """Associate cached Horizons vectors by header identity and reproduce direction
+    comparisons.
+    """
     result = compare(
         FIXTURES / "irac_real_headers.json",
         FIXTURES / "horizons_spitzer.ecsv",
@@ -23,6 +26,9 @@ def test_cached_horizons_checker_matches_explicit_header_ids():
 
 
 def test_local_bcd_checker_accepts_arbitrary_channels_and_coordinates(tmp_path):
+    """Validate local BCD samples across channels with explicitly supplied target
+    coordinates.
+    """
     make_bcd(tmp_path, "ch1")
     make_bcd(tmp_path, "ch4", subarray=True)
     output = tmp_path / "validation.json"

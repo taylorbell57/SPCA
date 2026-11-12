@@ -38,6 +38,9 @@ def star_frames(n=24):
 
 class ApertureMaskTests(unittest.TestCase):
     def test_valid_flux_order_and_uncertainty_inputs(self):
+        """Keep aperture flux ordering and propagate source/background uncertainty
+        inputs.
+        """
         frames = star_frames(1)
         frames[0, 15, 15] = -2  # Negative science pixels retain their flux.
         methods = ["center", "exact", "subpixel"]
@@ -107,6 +110,9 @@ class ApertureMaskTests(unittest.TestCase):
                 )
 
     def test_masked_and_nonfinite_pixels_are_not_partial_flux(self):
+        """Reject apertures containing invalid source pixels rather than saving
+        partial stellar flux.
+        """
         for bad in (np.ma.masked, np.nan, np.inf, -np.inf):
             with self.subTest(bad=bad):
                 frames = star_frames(4)
@@ -126,6 +132,9 @@ class ApertureMaskTests(unittest.TestCase):
                 self.assertTrue(np.isnan(result[2:]).all())
 
     def test_fractional_edges_and_each_aperture_use_their_actual_weights(self):
+        """Apply each aperture's fractional pixel weights to flux and uncertainty
+        calculations.
+        """
         frames = star_frames(1)
         frames[0, 15, 17] = np.ma.masked
         result = aperture.A_photometry(
@@ -136,6 +145,9 @@ class ApertureMaskTests(unittest.TestCase):
         self.assertTrue(np.isnan(result[1:, 1]).all())
 
     def test_invalid_background_or_centroid_keeps_result_shape(self):
+        """Retain aperture-result columns as invalid when background or centroid
+        information is missing.
+        """
         frames = star_frames(2)
         for bg in ([np.nan, 1], [np.inf, 1], [-1, 1], np.ma.array([1, 1], mask=[1, 0])):
             result = aperture.A_photometry(bg, img_data=frames, r=[1, 2])
@@ -149,6 +161,9 @@ class ApertureMaskTests(unittest.TestCase):
             self.assertTrue(np.isfinite(result[2:]).all())
 
     def test_global_stack_and_explicit_stack_agree(self):
+        """Obtain identical aperture measurements from shared worker state and
+        explicit image arrays.
+        """
         frames = star_frames(2)
         frames[1] = np.ma.masked
         with patch.object(aperture, "image_stack", frames):
@@ -161,6 +176,9 @@ class ApertureMaskTests(unittest.TestCase):
             self.assertIs(aperture.image_stack, frames)
 
     def test_empty_or_truncated_aperture_is_invalid(self):
+        """Reject empty or edge-truncated apertures instead of reporting incomplete
+        flux.
+        """
         frames = star_frames(1)
         frames.mask[0, 10:21, 10:21] = True  # Frame itself still has valid pixels.
         self.assertTrue(np.isnan(aperture.A_photometry([1], img_data=frames)).all())
@@ -174,6 +192,9 @@ class ApertureMaskTests(unittest.TestCase):
 
 class RejectedFrameTests(unittest.TestCase):
     def test_sigma_clipping_rejects_target_frame_but_only_bad_background_pixel(self):
+        """Distinguish a corrupted source exposure from an isolated bad background
+        pixel.
+        """
         frames = np.ones((64, 32, 32))
         frames[8, 15, 15] = 1000
         frames[9, 0, 0] = 1000
@@ -188,6 +209,9 @@ class RejectedFrameTests(unittest.TestCase):
         )
 
     def test_clipping_preserves_missing_and_newly_rejected_flux(self):
+        """Keep original missing flux and newly clipped outliers masked without
+        imputation.
+        """
         values = np.ma.array(np.ones(128), mask=False)
         values[5] = 1e9
         values[12] = np.nan
@@ -202,6 +226,9 @@ class RejectedFrameTests(unittest.TestCase):
         )
 
     def test_bins_ignore_hidden_data_and_keep_empty_bins_invalid(self):
+        """Exclude masked underlying values and preserve NaN statistics for empty
+        bins.
+        """
         values = np.ma.array(
             [2, 999, 888, 777, np.nan, 4, 6], mask=[0, 1, 1, 1, 0, 0, 0]
         )
@@ -210,6 +237,9 @@ class RejectedFrameTests(unittest.TestCase):
         np.testing.assert_allclose(std, [0, np.nan, 0, 0], equal_nan=True)
 
     def test_bin_all_data_retains_masked_metadata_and_new_flux_rejections(self):
+        """Save invalid metadata and newly rejected binned flux as NaN without
+        changing valid flux.
+        """
         flux = np.ones(128)
         flux[5] = 1e9
         metadata = np.ma.array(np.ones(128), mask=False)
@@ -221,6 +251,9 @@ class RejectedFrameTests(unittest.TestCase):
         self.assertEqual(result[12, 0], 1)
 
     def test_fits_preparation_preserves_masks_and_subtracts_background_in_parent(self):
+        """Preserve worker masks through FITS preparation and parent-process
+        background subtraction.
+        """
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             bcd = root / "planet/data/ch2/r123/ch2/bcd"
@@ -292,6 +325,9 @@ class RejectedFrameTests(unittest.TestCase):
             np.testing.assert_array_equal(images.mask, before.mask)
 
     def test_native_star_coordinates_and_flux_with_default_oversamp(self):
+        """Use native-pixel centroids and aperture sizes when oversampling is
+        disabled.
+        """
         frames = star_frames()
         n = len(frames)
         with TemporaryDirectory() as tmp:
@@ -341,6 +377,9 @@ class RejectedFrameTests(unittest.TestCase):
                         np.testing.assert_allclose(full[:, 0], 581.31272831, rtol=1e-10)
 
     def test_preloaded_oversampled_star_keeps_explicit_scale(self):
+        """Respect the caller's explicit pixel scale for an already oversampled image
+        stack.
+        """
         y, x = np.mgrid[:64, :64]
         star = 25 * np.exp(-((x - 30.5) ** 2 + (y - 30.5) ** 2) / 8)
         frames = np.repeat(star[None], 24, axis=0)
@@ -378,6 +417,9 @@ class RejectedFrameTests(unittest.TestCase):
         return aperture.get_lightcurve(tmp, "r123", "ch2", "planet", **options)
 
     def test_real_pipeline_returned_saved_and_plotted_data_retain_rejections(self):
+        """Preserve identical flux rejections in returned arrays, saved products and
+        diagnostic plots.
+        """
         frames = star_frames()
         frames[2:4] = np.ma.masked  # An empty bin.
         frames[6, 15, 15] = np.nan
@@ -404,7 +446,7 @@ class RejectedFrameTests(unittest.TestCase):
             with patch.object(matplotlib.axes.Axes, "plot", record_plot):
                 self.run_lightcurve(tmp, frames, save=True, savePlots=True)
             for i, (data, bins) in enumerate(zip(full, binned)):
-                folder = next(Path(tmp).rglob(f"4umExactCircular{['1_5', '2_5'][i]}*"))
+                folder = next(Path(tmp).rglob(f"ch2ExactCircular{['1_5', '2_5'][i]}*"))
                 np.testing.assert_allclose(
                     np.loadtxt(next(folder.glob("*full*.dat"))), data, equal_nan=True
                 )
@@ -417,6 +459,9 @@ class RejectedFrameTests(unittest.TestCase):
                 self.assertTrue((folder / "Lightcurve.pdf").is_file())
 
     def test_entirely_invalid_dataset_and_rms_selection(self):
+        """Handle entirely masked flux without selecting an invalid aperture as the
+        best result.
+        """
         with TemporaryDirectory() as tmp:
             frames = star_frames(8)
             frames[:] = np.ma.masked
@@ -444,6 +489,7 @@ class RejectedFrameTests(unittest.TestCase):
             self.assertEqual(rms[1], 0)
 
     def test_unbinned_outputs_and_low_flux_rejections(self):
+        """Retain unbinned row ordering and save low-flux rejections as NaN."""
         frames = star_frames()
         frames[2:4] = np.ma.masked
         frames[6] *= 0.01
@@ -454,6 +500,9 @@ class RejectedFrameTests(unittest.TestCase):
                 self.assertTrue(np.isfinite(data[0, 0]))
 
     def test_real_worker_exceptions_propagate_for_first_and_later_jobs(self):
+        """Propagate failures from both initial and later aperture workers to the
+        caller.
+        """
         with TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 self.run_lightcurve(tmp, star_frames(4), r=[-1])

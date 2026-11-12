@@ -31,6 +31,7 @@ from scipy import optimize as opt
 from scipy import stats as st
 
 from .irac_timing import exposure_midpoints, timing_header
+from .Photometry_Common import bin_array, bin_timestamps, create_folder
 from .spitzer_products import validate_science_product
 
 
@@ -618,30 +619,8 @@ def A_photometry(
 
 
 def binning_data(data, size):
-    """
-    Median bin an array.
-
-    Parameters
-    ----------
-    data     : 1D array
-        Array of data to be binned.
-
-    size     : int
-        Size of bins.
-
-    Returns
-    -------
-    binned_data: 1D array
-        Array of binned data.
-
-    binned_data: 1D array
-        Array of standard deviation for each entry in binned_data.
-    """
-    data = np.ma.masked_invalid(data)
-    reshaped_data = data.reshape((len(data) / size, size))
-    binned_data = np.ma.median(reshaped_data, axis=1)
-    binned_data_std = np.std(reshaped_data, axis=1)
-    return binned_data, binned_data_std
+    """Return median and population scatter, retaining a partial final bin."""
+    return bin_array(data, size)
 
 
 def get_lightcurve(
@@ -734,6 +713,13 @@ def get_lightcurve(
     Error      :
         If Photometry method is not supported/recognized by this pipeline.
     """
+    if save:
+        create_folder(
+            savepath,
+            auto=True,
+            overwrite=True,
+            products=(save_full.lstrip("/"), save_bin.lstrip("/"), "popt.dat"),
+        )
 
     print(kwargs)
     # Ignore warning and starts timing
@@ -857,7 +843,7 @@ def get_lightcurve(
 
     if bin_data == True:
         binned_flux, binned_flux_std = binning_data(np.asarray(aperture_sum), bin_size)
-        binned_time, binned_time_std = binning_data(np.asarray(time), bin_size)
+        binned_time, binned_time_std = bin_timestamps(time, aperture_sum, bin_size)
         binned_xo, binned_xo_std = binning_data(np.asarray(xo), bin_size)
         binned_yo, binned_yo_std = binning_data(np.asarray(yo), bin_size)
         binned_xw, binned_xw_std = binning_data(np.asarray(xw), bin_size)
@@ -930,7 +916,7 @@ def get_lightcurve(
                 bin_size=bin_size,
                 product_kind="companion",
                 time_column=2,
-                binning="median of finite timestamps; independent of flux masks",
+                binning="median of timestamps of surviving flux samples",
             ),
         )
         np.savetxt(
@@ -945,7 +931,7 @@ def get_lightcurve(
                 bin_size=bin_size,
                 product_kind="companion",
                 time_column=2,
-                binning="median of finite timestamps; independent of flux masks",
+                binning="median of timestamps of surviving flux samples",
             ),
         )
 

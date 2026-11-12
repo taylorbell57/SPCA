@@ -78,6 +78,9 @@ class FullFrameTests(unittest.TestCase):
         return prepare_images(self.base, "planet", "ch2", "r", ncpu=1, **kwargs)
 
     def test_verified_positions_wcs_origin_axes_units_and_conversion(self):
+        """Recover synthetic sky positions with correct WCS origin, axis order and
+        electron conversion.
+        """
         for n, position in enumerate(POSITIONS):
             path = self.write(n, position=position)
             header = fits.getheader(path)
@@ -102,6 +105,9 @@ class FullFrameTests(unittest.TestCase):
             self.assertAlmostEqual(cy[0], y - crop[0].start, delta=0.15)
 
     def test_distorted_wcs_accuracy_away_from_reference_pixel(self):
+        """Apply celestial distortion when locating targets away from the WCS
+        reference pixel.
+        """
         w = WCS(image_header(POSITIONS[1]))
         w.wcs.ctype = ["RA---TAN-SIP", "DEC--TAN-SIP"]
         a, b = np.zeros((3, 3)), np.zeros((3, 3))
@@ -117,6 +123,7 @@ class FullFrameTests(unittest.TestCase):
             self.assertTrue(15 <= y - crop[0].start < 16)
 
     def test_all_image_boundaries_are_validated_without_shifting(self):
+        """Reject off-detector crops without silently shifting the target stamp."""
         for position in ((15.25, 15.25), (239.75, 239.75)):
             path = self.write(str(position), position=position)
             crop = full_frame_crop(fits.getheader(path), TARGET)
@@ -129,6 +136,7 @@ class FullFrameTests(unittest.TestCase):
                 full_frame_crop(fits.getheader(path), TARGET)
 
     def test_missing_or_invalid_target_and_missing_wcs_fail_clearly(self):
+        """Require finite target coordinates and celestial WCS for full-frame crops."""
         path = self.write(1)
         with self.assertRaisesRegex(ValueError, "require target_coord"):
             self.load()
@@ -143,6 +151,9 @@ class FullFrameTests(unittest.TestCase):
             full_frame_crop(header, TARGET)
 
     def test_fixed_crop_per_aor_retains_drift_and_uses_each_aors_wcs(self):
+        """Fix each AOR crop to its first BCD while retaining subsequent pointing
+        drift.
+        """
         paths, expected, times = [], [], []
         for n, position in enumerate(POSITIONS):
             for i in range(2):
@@ -178,6 +189,9 @@ class FullFrameTests(unittest.TestCase):
         np.testing.assert_allclose(breaks, expected_breaks, rtol=0, atol=1e-8)
 
     def test_bad_pixels_and_full_frame_star_masks_use_crop_offsets(self):
+        """Translate bad pixels and nearby-star masks into the same cropped
+        coordinates.
+        """
         position = POSITIONS[1]
         data = full_image(position)
         data[128, 126], data[120, 118] = np.nan, np.inf
@@ -207,6 +221,7 @@ class FullFrameTests(unittest.TestCase):
         self.assertTrue(np.isnan(flux).all())
 
     def test_full_frame_correction_stack_is_cropped_identically(self):
+        """Subtract correction-stack pixels matching the selected full-frame crop."""
         path = self.write(1)
         correction = np.arange(256 * 256, dtype=float).reshape(256, 256)
         crop = full_frame_crop(fits.getheader(path), TARGET)
@@ -244,6 +259,9 @@ class FullFrameTests(unittest.TestCase):
             )
 
     def test_full_frame_diagnostics_skip_even_64_files_and_exclusions_reject(self):
+        """Skip subarray-position diagnostics for full frames and reject cube-
+        position exclusions.
+        """
         path = self.write(1)
         # Simulate a multiple-of-64 file count without duplicating fixtures.
         with (
@@ -262,6 +280,7 @@ class FullFrameTests(unittest.TestCase):
             )
 
     def test_subarray_pixels_timestamps_masks_and_diagnostics_remain_unchanged(self):
+        """Preserve native subarray pixels, frame exclusions and diagnostic dispatch."""
         y, x = np.mgrid[:32, :32]
         data = np.repeat((10 + (-1.0) ** (x + y))[None], 64, axis=0)
         data[:, 15, 15] += 100
@@ -304,6 +323,9 @@ class FullFrameTests(unittest.TestCase):
         extract.assert_called_once()
 
     def test_end_to_end_baseline_radii_centroids_and_output_products(self):
+        """Exercise full-frame preparation, aperture selection and saved photometry
+        together.
+        """
         for i in range(11):
             self.write(
                 1,

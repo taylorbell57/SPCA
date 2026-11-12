@@ -11,7 +11,7 @@ from astropy import constants as const
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 
-from .irac import WAVELENGTH_UM, aor_tag, aperture_prefix, validate_channel
+from .irac import WAVELENGTH_UM, aor_tag, resolve_photometry_dir, validate_channel
 from .irac_timing import convert_time, load_aor_breaks
 
 warnings.filterwarnings("ignore")
@@ -368,12 +368,45 @@ def loadCustomData(
     return p0_obj
 
 
-# FIX: Add a docstring for this function (docstring not done)
+PHOENIX_BRIGHTNESS_WINDOWS_UM = {"ch1": (3.0, 4.0), "ch2": (4.0, 5.0)}
+# Historical broad windows for the approximate brightness calculation below;
+# these are not IRAC response-function limits or calibrated band integrals.
+
+
+def _phoenix_window(wavelength_um, flux, channel):
+    """Require a finite spectrum spanning the complete approximation window.
+
+    Wavelengths are vacuum micrometres from the HiRes FITS wavelength file.
+    Reject truncated files and invalid samples instead of summing an incomplete
+    window. The selected Göttingen PHOENIX-ACES library ends near 5.5 micrometres:
+    https://phoenix.astro.physik.uni-goettingen.de/
+    """
+    low, high = PHOENIX_BRIGHTNESS_WINDOWS_UM[channel]
+    wavelength_um, flux = np.asarray(wavelength_um), np.asarray(flux)
+    if (
+        wavelength_um.ndim != 1
+        or wavelength_um.shape != flux.shape
+        or len(wavelength_um) < 2
+        or not np.isfinite(wavelength_um).all()
+        or np.any(np.diff(wavelength_um) <= 0)
+        or wavelength_um[0] > low
+        or wavelength_um[-1] < high
+    ):
+        raise ValueError(f"PHOENIX wavelength coverage must span {low}-{high} um")
+    selected = (wavelength_um > low) & (wavelength_um < high)
+    if selected.sum() < 2 or not np.isfinite(flux[selected]).all():
+        raise ValueError("Insufficient finite PHOENIX samples in brightness window")
+    return selected
+
+
 def getTstarBright(rootpath, planet, channel, p0_obj):
-    """Calculate the stellar brightness temperature based on phoenix spectrum.
-    This automatic PHOENIX approximation is restricted to ch1/ch2. Ch3/ch4
-    explicitly raise NotImplementedError; callers need a separate stellar-
-    response treatment before using analysis drivers that invoke this step.
+    """Approximate ch1/ch2 stellar brightness temperature from PHOENIX spectra.
+
+    The existing calculation compares sample sums with Planck spectra over
+    broad windows, without IRAC response weighting or wavelength quadrature.
+    Loaded files must span those windows. The selected PHOENIX-ACES HiRes files
+    end near 5.5 um, so ch3/ch4 need spectra covering their complete response
+    functions and an appropriate bandpass integration.
 
     Args:
         rootpath (str): Path to data
@@ -381,15 +414,16 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
         channel  (str): Spitzer channel used to obtain the observation (ch1 or ch2)
         p0_obj (obj): object with initial parameters
     Returns:
-        tstar_b (): ???
-        p0_obj['Tstar_err'] (float): uncertainty on stellar temperature
+        tuple: Approximate brightness temperature and adopted stellar-temperature
+            uncertainty, both in kelvin.
     """
 
     validate_channel(channel)
     if channel in ("ch3", "ch4"):
         raise NotImplementedError(
-            "Automatic PHOENIX brightness temperature is only calibrated for "
-            "ch1/ch2; supply a response-integrated ch3/ch4 stellar model."
+            "The selected PHOENIX-ACES HiRes files end near 5.5 um; "
+            "ch3/ch4 require stellar spectra covering their full bandpasses "
+            "and response integration."
         )
 
     # Get the phoenix file ready to compute the stellar brightness temperature
@@ -463,9 +497,10 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
         print("Done download.", flush=True)
 
     with fits.open(phoenixSpectraFile) as f:
-        fStar = f[0].data * 1e-1  # 'erg/s/cm^2/cm' to kg/s^3
+        fStar = f[0].data * 1e-1  # erg/(s cm^2 cm) to W/m^3 (surface F_lambda)
     with fits.open(phoenixWavFile) as f:
         wavStar = f[0].data * 1e-4  # angstrom to micron
+    selected = _phoenix_window(wavStar, fStar, channel)
 
     def planck(wav, T):
         intensity = (2.0 * const.h.value * const.c.value**2) / (
@@ -481,13 +516,10 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
         # factor of pi likely needed to account for emitting area (pi*rstar^2 where rstar=1)
         return (np.sum(planck(wavs, temp) * np.pi) - fStarSummed) ** 2
 
+    # Historical temperature search: 3000-11000 K inclusive, in 10 K steps.
     temps = np.linspace(3000, 11000, 801, endpoint=True)
-    if channel == "ch1":
-        incides = np.where(np.logical_and(wavStar < 4.0, wavStar > 3.0))[0]
-    else:
-        incides = np.where(np.logical_and(wavStar < 5.0, wavStar > 4.0))[0]
     diffs = [
-        fluxDiff(temp, np.sum(fStar[incides]), wavStar[incides] * 1e-6)
+        fluxDiff(temp, np.sum(fStar[selected]), wavStar[selected] * 1e-6)
         for temp in temps
     ]
     tstar_b = temps[np.argmin(diffs)]
@@ -500,7 +532,13 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
 def findPhotometry(
     rootpath, planet, channel, mode, pldIgnoreFrames=True, pldAddStack=False
 ):
-    """Calculate the stellar brightness temperature based on phoenix spectrum.
+    """Select dataset-specific aperture, PLD or PSF products and AOR boundaries.
+
+    Aperture ranking uses exact paths in bestPhOption.txt across both naming
+    conventions. PLD/PSF lookup accepts legacy ch1/ch2 names but rejects two
+    copies of the same dataset. PSF centroids use the selected aperture's
+    stack/exclusion settings. Return absolute product directories.
+
     Args:
         rootpath (str): Path to data
         planet   (str): name of the planet
@@ -528,11 +566,7 @@ def findPhotometry(
 
     mainpath = rootpath + planet + "/analysis/" + channel + "/"
     ignoreFrames = np.array([])
-    if "psfx" == mode.lower():
-        foldername = aperture_prefix(channel)
-        foldername += "PSF/"
-
-    elif "pld" in mode.lower():
+    if "pld" in mode.lower():
         foldername = mainpath
 
         if pldIgnoreFrames:
@@ -556,9 +590,10 @@ def findPhotometry(
             foldername += "noIgnore/"
         else:
             foldername += "ignore/"
-        foldername += aperture_prefix(channel)
-        foldername += "PLD_"
-        foldername += mode.split("x")[0][-1] + "x" + mode.split("x")[1][0] + "/"
+        suffix = "PLD_" + mode.split("x")[0][-1] + "x" + mode.split("x")[1][0]
+        foldername = resolve_photometry_dir(
+            foldername, channel, suffix, selected_full_name
+        )
 
     else:
         phoption = ""
@@ -604,6 +639,13 @@ def findPhotometry(
 
         if not phoption:
             raise ValueError(f"No selected photometry for AOR tag {tag}")
+        if mode.lower() == "psfx":
+            foldername = resolve_photometry_dir(
+                os.path.dirname(foldername.rstrip("/")),
+                channel,
+                "PSF",
+                selected_full_name,
+            )
 
     # path where outputs are saved
     savepath = foldername + mode + "/"

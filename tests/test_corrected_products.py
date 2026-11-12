@@ -49,6 +49,9 @@ def digest(path):
 def test_individual_correction_preview_apply_and_exclusive_reuse(
     tmp_path, channel, time_format
 ):
+    """Validate separate corrected exports, audit hashes, unchanged science columns
+    and exclusive writes.
+    """
     source, out, args = correction_inputs(tmp_path, channel, time_format)
     before = {str(p): p.read_bytes() for p in source.iterdir()}
     preview = correct_products(**args)
@@ -87,6 +90,9 @@ def test_individual_correction_preview_apply_and_exclusive_reuse(
 def test_corrected_tree_detection_is_independent_of_manifest_schema(
     tmp_path, indicator
 ):
+    """Protect corrected exports from reduction and cleanup regardless of marker
+    contents.
+    """
     root = tmp_path / "tree"
     root.mkdir()
     if indicator == "marker":
@@ -110,6 +116,9 @@ def test_corrected_tree_detection_is_independent_of_manifest_schema(
 
 
 def test_unmarked_native_tree_is_available_for_reduction(tmp_path):
+    """Allow ordinary uncorrected trees through the corrected-product protection
+    guard.
+    """
     (tmp_path / "native.dat").write_text("# legacy/unversioned\n1 55000\n")
     assert_reduction_tree(tmp_path, recursive=True)
 
@@ -119,6 +128,9 @@ def test_unmarked_native_tree_is_available_for_reduction(tmp_path):
 def test_direct_corrected_file_is_protected_without_tree_marker(
     tmp_path, relocated, recursive
 ):
+    """Protect relocated corrected tables using their own metadata without requiring
+    parent markers.
+    """
     _, out, args = correction_inputs(tmp_path)
     out.mkdir()
     correct_products(**args, apply=True)
@@ -142,6 +154,9 @@ def test_direct_corrected_file_is_protected_without_tree_marker(
 def test_direct_uncorrected_file_is_available_for_reduction(
     tmp_path, versioned, recursive
 ):
+    """Allow direct paths to unversioned native products through the correction
+    guard.
+    """
     path = tmp_path / "native.dat"
     header = timing_header() if versioned else "legacy/unversioned"
     np.savetxt(path, [[1, 55000]], header=header)

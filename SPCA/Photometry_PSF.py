@@ -23,6 +23,7 @@ from .make_plots import plot_photometry
 from .Photometry_Common import (
     _get_pool,
     bin_array,
+    bin_timestamps,
     clip_data,
     create_folder,
     prepare_images,
@@ -297,7 +298,7 @@ def get_lightcurve(
 
     if bin_data:
         binned_flux, binned_flux_std = bin_array(flux, bin_size)
-        binned_time, binned_time_std = bin_array(time, bin_size)
+        binned_time, binned_time_std = bin_timestamps(time, flux, bin_size)
         binned_xo, binned_xo_std = bin_array(xo, bin_size)
         binned_yo, binned_yo_std = bin_array(yo, bin_size)
         binned_xw, binned_xw_std = bin_array(xw, bin_size)
@@ -327,7 +328,12 @@ def get_lightcurve(
 
         savepath = savepath + folder
 
-        savepath = create_folder(savepath, True, True)
+        savepath = create_folder(
+            savepath,
+            True,
+            True,
+            products=(save_full, save_bin) if save else (),
+        )
 
     if savePlots or showPlots:
         if bin_data:
@@ -392,7 +398,8 @@ def get_lightcurve(
                 target_coord,
                 time_format,
                 bin_size=bin_size,
-                binning="median of finite timestamps; independent of flux masks",
+                binning="median of timestamps of surviving flux samples",
+                flux_preprocessing="neighbor-median imputation during clipping",
             ),
         )
         if bin_data:
@@ -425,7 +432,8 @@ def get_lightcurve(
                     target_coord,
                     time_format,
                     bin_size=bin_size,
-                    binning="median of finite timestamps; independent of flux masks",
+                    binning="median of timestamps of surviving flux samples",
+                    flux_preprocessing="neighbor-median imputation during clipping",
                 ),
             )
 

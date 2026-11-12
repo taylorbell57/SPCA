@@ -38,6 +38,9 @@ TARGET = SkyCoord(
 
 
 def test_default_bmjd_tdb_and_explicit_bjd():
+    """Default to BMJD_TDB and change JD/MJD format without applying a second scale
+    correction.
+    """
     h = HEADERS[0]["header"]
     utc = exposure_midpoints(h, "utc")
     tdb = get_time(h)
@@ -61,6 +64,9 @@ def test_default_bmjd_tdb_and_explicit_bjd():
     "entry", HEADERS, ids=lambda e: e["channel"] + "-" + e["id"].split("/")[-1]
 )
 def test_real_header_directions_and_target_geometry(entry):
+    """Check real-header direction delays against an independent barycentric vector
+    calculation.
+    """
     h = entry["header"]
     target = SkyCoord(h["RA_RQST"] + 0.02, h["DEC_RQST"] - 0.01, unit="deg")
     # Independent vector computation, retaining the rounded header anchor.
@@ -81,6 +87,9 @@ def test_real_header_directions_and_target_geometry(entry):
 
 
 def test_target_and_header_reference_are_distinct_and_fail_closed():
+    """Distinguish requested and target sight lines and reject incomplete or
+    inconsistent states.
+    """
     h = HEADERS[0]["header"].copy()
     assert timing_metadata()["barycentric"] == "header_reference_fixed_per_dce"
     assert timing_metadata(target_coord=TARGET)["barycentric"].startswith(
@@ -99,6 +108,9 @@ def test_target_and_header_reference_are_distinct_and_fail_closed():
 
 
 def test_companion_absolute_default_and_tuple_target():
+    """Use absolute TDB companion timing and accept equivalent SkyCoord and degree-
+    pair targets.
+    """
     header = fits.Header(HEADERS[0]["header"])
     hdus = fits.HDUList([fits.PrimaryHDU(header=header)])
     # PrimaryHDU with no data resets NAXIS; restore timing geometry explicitly.
@@ -111,6 +123,9 @@ def test_companion_absolute_default_and_tuple_target():
 
 
 def test_saved_metadata_and_model_normalization(tmp_path):
+    """Normalize declared BJD_TDB and refuse missing, conflicting or UTC model-input
+    metadata.
+    """
     path = tmp_path / "phot.dat"
     np.savetxt(path, [[1, 2455000.5]], header=timing_header(time_format="bjd"))
     assert model_times(path, [2455000.5])[0] == 55000
@@ -134,6 +149,9 @@ def test_saved_metadata_and_model_normalization(tmp_path):
 
 
 def test_correction_bjd_format_and_double_conversion(tmp_path):
+    """Write audited BJD_TDB copies and refuse to correct an already versioned
+    product again.
+    """
     args, new = legacy_products(tmp_path, time_scale="tdb")
     args.update(
         output_full=tmp_path / "fixed.dat",
@@ -151,6 +169,7 @@ def test_correction_bjd_format_and_double_conversion(tmp_path):
 
 
 def test_custom_ephemeris_format_is_explicit():
+    """Require explicit BJD input format and a TDB scale for custom transit epochs."""
     from SPCA import Decorrelation_helper as dh
 
     args = dict(
@@ -177,6 +196,7 @@ def test_custom_ephemeris_format_is_explicit():
 
 
 def test_conflicting_markers_refused(tmp_path):
+    """Reject contradictory text and JSON timing declarations."""
     path = tmp_path / "bad.dat"
     text = timing_header()
     text = text.replace("irac-midpoint-v3; BMJD_TDB", "irac-midpoint-v3; BMJD_UTC")
@@ -187,6 +207,9 @@ def test_conflicting_markers_refused(tmp_path):
 
 @pytest.mark.parametrize("method", ["psf", "pld"])
 def test_other_photometry_saves_declared_tdb(tmp_path, method):
+    """Save PSF and PLD time columns with consistent TDB metadata and all-valid bin
+    medians.
+    """
     from SPCA import Photometry_PLD, Photometry_PSF
 
     module = Photometry_PSF if method == "psf" else Photometry_PLD
@@ -224,6 +247,7 @@ def test_other_photometry_saves_declared_tdb(tmp_path, method):
 
 
 def test_companion_full_model_loader_uses_declared_time_column(tmp_path):
+    """Read companion full-resolution time from its declared third column."""
     from SPCA.helpers import get_full_data
 
     time = 55000 + np.arange(16) / 86400
@@ -240,6 +264,9 @@ def test_companion_full_model_loader_uses_declared_time_column(tmp_path):
 
 @pytest.mark.parametrize("kind", ["utc", "old_version", "other_target", "compatible"])
 def test_preloaded_resume_requires_matching_timing(kind):
+    """Require preloaded timestamps to match version, scale and science-target
+    metadata.
+    """
     metadata = timing_metadata(target_coord=TARGET)
     if kind == "utc":
         metadata = timing_metadata("utc", TARGET)
@@ -255,6 +282,9 @@ def test_preloaded_resume_requires_matching_timing(kind):
 
 
 def test_mission_clock_against_independent_astropy_scale_conversion():
+    """Check mission-clock TDB against Astropy within the header clocks' millisecond
+    rounding.
+    """
     for entry in HEADERS:
         h = entry["header"]
         expected = Time(h["DATE_OBS"], scale="utc").tdb
@@ -265,6 +295,9 @@ def test_mission_clock_against_independent_astropy_scale_conversion():
 
 @pytest.mark.parametrize("coordinates", [(0.0, 0.0), (120.0, -20.0), (250.0, 60.0)])
 def test_target_direction_against_cached_horizons(coordinates):
+    """Compare target delays with cached Horizons states while accounting for header-
+    orbit error.
+    """
     from astropy.table import Table
 
     table = Table.read(Path(__file__).parent / "fixtures/horizons_spitzer.ecsv")
@@ -296,6 +329,9 @@ def test_target_direction_against_cached_horizons(coordinates):
     "kind", ["legacy", "utc", "different_target", "different_rows", "compatible"]
 )
 def test_combined_model_inputs_require_compatible_times(tmp_path, kind):
+    """Reject mixed PLD/aperture inputs with incompatible declarations or different
+    time rows.
+    """
     from SPCA.helpers import require_matching_times
 
     first, second = tmp_path / "first.dat", tmp_path / "second.dat"
