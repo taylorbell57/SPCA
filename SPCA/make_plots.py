@@ -110,7 +110,7 @@ def plot_photometry(
     axes[4].plot(time0 - 5e4, psfyw0, "r.", markersize=1, alpha=0.7)
     axes[4].plot(time - 5e4, psfyw, "k.", markersize=2, alpha=1.0)
     axes[4].set_ylabel(r"$\sigma_y$")
-    axes[4].set_xlabel(r"$\rm Time~(BJD-2450000.5)$")
+    axes[4].set_xlabel(r"$\rm Time~(BJD_{TDB}-2450000.5)$")
 
     for i in range(5):
         for j in range(len(breaks)):
@@ -446,7 +446,7 @@ def plot_model(
             alpha=1,
         )
     axes[3].set_ylabel(r"$\rm Residuals$", fontsize=fontsize)
-    axes[3].set_xlabel(r"$\rm Time~(BJD-2450000.5)$", fontsize=fontsize)
+    axes[3].set_xlabel(r"$\rm Time~(BJD_{TDB}-2450000.5)$", fontsize=fontsize)
 
     for i in range(len(axes)):
         axes[i].xaxis.set_tick_params(labelsize=fontsize * 0.8)

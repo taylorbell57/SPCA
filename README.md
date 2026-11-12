@@ -76,6 +76,118 @@ copies. Running setup again on these trees is supported.
 
 6. Finally, some tables containing a selection of the fitted parameters from each model run can be made using the MakeTables file. These tables will also highlight the best decorrelation method for each analysis, determined using delta-BIC (selecting your model is actually quite a challenging and complicated step, and user discretion is absolutely recommended).
 
+## IRAC timing and legacy light curves
+
+SPCA photometry defaults to **BMJD_TDB**, in days. Request `time_format="bjd"`
+for BJD_TDB: `BJD_TDB = BMJD_TDB + 2400000.5`. JD versus MJD is a numerical
+format; UTC versus TDB is a time scale. A barycentric correction additionally
+depends on the observer's position and target direction. Neither a format change
+nor a scale conversion recomputes that correction. Instrument-relative clocks
+are not absolute barycentric timestamps. Archive search dates remain UTC.
+
+### Exposure times and accuracy
+
+For a 64-frame subarray cube, frame `i = 0..63` has the central-pixel midpoint
+`(i + 0.5)*FRAMTIME + 0.003231` seconds after its own BCD start. The 3.231-ms
+adjustment follows the [IRAC timing prescription](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/irachpp/timing/).
+The old `linspace` endpoint compressed the cadence; a 2-second cube's last frame
+was about one second early. Independent BCD anchors preserve real command and
+AOR gaps. Full frames use the **nominal `FRAMTIME/2` midpoint**, without a
+calibrated pixel/Fowler readout correction; `EXPTIME/2` is not a substitute.
+Starting from barycentric UTC `BMJD_OBS`, SPCA converts to TDB by adding
+`(ET_OBS - UTCS_OBS)/86400`, as described in the
+[IRAC Handbook §6.3](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/32/).
+Do not apply another Earth-observer barycentric correction to these times.
+
+Supply `target_coord` for either full-frame or subarray photometry to correct
+the header's requested direction to the science target. SPCA uses the
+[header spacecraft position and velocity](https://irsa.ipac.caltech.edu/docs/knowledgebase/spitzer_general.html)
+plus the builtin ERFA barycentric Sun, and evolves the delay linearly within each
+BCD. This is a **target-direction-corrected header timestamp**, retaining the
+mission clock/orbit anchor; it is distinct from an independent precision orbit
+calculation. Without coordinates, SPCA retains the header direction and holds
+its correction fixed within each BCD. Missing or inconsistent required header
+information raises an error. Successive IER observations can have unreliable
+requested pointing, so target correction checks the direction encoded by the
+header delay before using it.
+
+Absolute precision remains limited: the documented instrument/spacecraft clock
+uncertainty is typically about 20 ms, with a worst case below 70 ms, and header
+rounding and orbit uncertainties remain. Independent checks against JPL Horizons
+at four epochs found projected header-state differences reaching about **57 ms**;
+they do not establish millisecond accuracy or validate every AOR. The cached
+comparison is reproducible with `python tools/check_irac_ephemeris.py --help`.
+Full-frame midpoint error is not independently bounded. Subarrays use the central
+pixel without the documented row/column refinement; supplied target coordinates
+are treated as static ICRS directions, without new proper-motion or parallax
+corrections. Precision orbit replacement requires independently validated
+spacecraft ephemerides and interpolation.
+
+### Existing products and API compatibility
+
+Older SPCA products may contain **BMJD_UTC**, including the compressed subarray
+cadence. Never interpret or relabel them as BMJD_TDB. New `SPCA_TIMING_JSON`
+headers declare format, scale, timing version, target coordinates when supplied,
+and whether the barycentric reference is the header or target direction.
+`Time std` is within-bin scatter in days, not absolute timing uncertainty.
+
+Supported legacy aperture products can be corrected without repeating
+photometry when their complete BCD headers reconstruct the original rows and
+binning unambiguously. `python -m SPCA.timing_correction --help` describes header
+inventory export and correction of individual full/binned aperture pairs.
+Report-only is the default. Explicit application writes separate products,
+an optional AOR-boundary file, and a JSON audit with input/output hashes,
+preserving non-time values and rejection masks. Already-versioned or ambiguous
+inputs and destructive overwrites are refused. The utility handles the legacy
+8-column aperture / 16-column binned schema, not arbitrary extraction formats.
+For example, after creating a new destination directory:
+
+```bash
+python -m SPCA.timing_correction correct \
+    --headers headers.json --full legacy_full.dat --binned legacy_binned.dat \
+    --bin-size 64 --target-coord 120.0 -20.0 \
+    --output-full corrected/full.dat --output-binned corrected/binned.dat \
+    --output-breaks corrected/aorBreaks_AORs123.txt --audit corrected/audit.json
+```
+
+This previews and validates the correction; add `--apply` to write it, or
+`--time-format bjd` for BJD_TDB. Build `headers.json` using the utility's
+`inventory` command with the exact science AORs and expected BCD count.
+Corrected tables declare `product_role="timing_corrected"`. Custom cleanup
+drivers should call `SPCA.timing_correction.assert_reduction_tree(path,
+recursive=True)` before modifying a tree; the guard detects corrected tables,
+root markers, and audit directories. It provides protection for callers rather
+than intercepting arbitrary filesystem deletion.
+
+Important compatibility changes:
+
+* Photometry now defaults to TDB. Explicit `time_scale="utc"` selects the legacy
+  scale but does not restore the old cadence error. Companion timing is absolute,
+  rather than instrument uptime.
+* Model loaders require declared TDB products and normalize BJD_TDB to BMJD_TDB.
+  `loadCustomData` expects `t0` in BMJD_TDB; existing BJD_TDB callers must pass
+  `t0_format="bjd"`. Archive epochs require a documented TDB scale or an explicit,
+  independently verified `t0_scale="tdb"` assertion.
+* Preloaded photometry arrays require matching `input_time_metadata`; this
+  declares their existing convention and does not convert their values.
+* Model fitting requires validated `aorBreaks_AORs<tag>.txt` boundaries for the
+  selected dataset; it never falls back to potentially stale `aorBreaks.txt`.
+  Reusing preloaded arrays requires matching timing metadata rather than file
+  existence alone.
+
+Run the self-contained, offline package tests with:
+
+```bash
+python -m pip install -e '.[dev,download]'
+python -m pytest tests
+```
+
+The tests use synthetic images plus six small real header records and cached
+geometric Horizons vectors. No external science archive is required. Optional
+local-image checks accept arbitrary targets through
+`python tools/validate_irac_samples.py --help`; the cached ephemeris comparison
+is documented by `python tools/check_irac_ephemeris.py --help`.
+
 ## Programmatic Spitzer/IRAC downloads
 
 Install optional archive dependencies (existing-file users do not need them):
@@ -256,6 +368,27 @@ Photometry defaults to **exact** `*_bcd.fits` matches, never the old
 companion `get_lightcurve(..., science_product="cbcd")` APIs to choose CBCD.
 Both image versions may remain on disk, but are never jointly loaded.
 
+#### IRAC channels, observing modes, and extraction
+
+Ch1/ch2 have established legacy use. Ch3/ch4 extraction and full-frame WCS
+handling have been extended, with more limited real-observation validation.
+The table describes implemented paths with `oversamp=False`; implementation
+and synthetic coverage do not establish scientific calibration of every case.
+
+| Component | Implemented geometry and channel handling | Validation and practical limits |
+| --- | --- | --- |
+| Aperture photometry | Ch1–ch4, 32×32 subarray frames and WCS crops of 256×256 full frames | Synthetic extraction, centroiding, binning and aperture selection across all four channels; recent real ch3/ch4 checks used four BCDs and two short extraction runs, not complete eclipse reductions. |
+| PSF photometry | Both geometries through shared preparation; channel naming/header conversion for ch1–ch4 | Fits a normalized 2D Gaussian in a fixed central 5×5 window. Native-pixel synthetic extraction/output tests exist; full-frame and ch3/ch4 science time series still need method-specific validation. |
+| PLD | Both geometries through shared preparation; ch1–ch4 paths | Extracts native-pixel 3×3 or 5×5 stamps centered at `(15,15)`. Synthetic output tests exist; full-frame and ch3/ch4 PLD science performance is insufficiently validated. |
+| Companion extraction | Specialized legacy two-source subarray routine; accepts channel-specific paths | Full-frame extraction explicitly raises `NotImplementedError`. Narrow source initialization/bounds require review for a new field; ch3/ch4 companion extraction has not been established by the recent tests. |
+| Frame-position diagnostics | Selections consisting entirely of 64×32×32 cubes | Other geometries return no exclusions. Overlapping/interleaved cubes are refused. An empty result for full frames is a skipped diagnostic, not evidence of clean data. |
+| Timing and model inputs | Shared BMJD_TDB timing for all channels; method-specific saved columns | Real headers and cached ephemerides check timing geometry; model loaders validate declared TDB. These checks do not validate a complete astrophysical fit or detector model. |
+
+All four extraction APIs select BCD or CBCD explicitly; they do not produce
+CBCD artifact corrections themselves. Product-selection routing is covered
+synthetically. The recent small real ch3/ch4 checks used BCDs, and do not
+establish CBCD science performance or equivalence of the processing versions.
+
 Full-frame IRAC BCDs (256×256, one exposure per file) require explicit target
 coordinates. Pass a scalar Astropy `SkyCoord` or an `(RA, Dec)` pair in degrees:
 
@@ -280,16 +413,40 @@ and must fit entirely within the original image; missing coordinates, missing
 celestial WCS, and crops crossing the image edge raise errors. Other-star
 masks and full-frame correction stacks use the same crop offsets.
 
-The existing 64×32×32 subarray stamps, timing calculation, clipping, and
-photometry are unchanged and need no target coordinates. Cube-position
-diagnostics automatically return no exclusions for full-frame or mixed
-selections, and full-frame extraction requires `ignoreFrames=[]` (or `None`).
-Baseline aperture photometry retains radius optimization, fixed/moving
-centroids, the existing background-scatter/photon-noise error model, and the
-same unbinned and binned output columns. Full-frame times are
-`BMJD_OBS + FRAMTIME / (2 * 86400)`; `Flux std` remains within-bin scatter.
+Subarrays retain their 32×32 stamps; the usual 64-frame cubes use the repaired
+per-frame timing. The loader can handle other positive cube lengths, but frame
+diagnostics require exactly 64. Full-frame extraction requires
+`ignoreFrames=[]` (or `None`). See [timing and accuracy](#irac-timing-and-legacy-light-curves)
+for the nominal full-frame midpoint and the limits of target-direction timing.
+
+Aperture photometry offers fixed/moving centroids, a radius/edge-method search,
+and RMS ranking; `onlyBest=True` saves the winning pair when a finite ranking
+exists. Its `centroid_bounds` and background-exclusion `background_bounds` are
+configurable. Defaults are shared across channels: wider Si:As PSFs and pointing
+drift require users to assess these windows. PSF/PLD high-level calls retain
+fixed source windows. Background subtraction and optional `addStack` lookup
+provide extraction operations, without new detector-specific calibration.
+
+Aperture tables retain 8 unbinned columns and 16 binned columns; the
+unbinned table does not save the internally computed aperture-flux uncertainty.
+PSF tables have 7/14 columns; PLD saves pixel vectors with time/background
+columns; companion unbinned tables also include flux uncertainty. Binned `Flux std`
+is empirical scatter, not a propagated error on the mean. Model loaders retain
+their method-specific schemas and require matching conventions when combining
+products. Inspect flux, masks, centroids and widths before scientific fitting.
 Use separate analysis output directories when comparing target coordinates
 or crop settings, since output filenames retain their existing structure.
+
+All four IRAC channels use their own header calibration values and retain the
+historical directory prefixes `3um`, `4um`, `5um`, and `8um` for ch1–ch4. Channel
+support does not supply new corrections for Si:As ramps, persistence, intrapixel effects,
+[banding](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/40/),
+or [aperture/calibration effects](https://irsa.ipac.caltech.edu/data/SPITZER/docs/irac/iracinstrumenthandbook/17/).
+Source/background windows are extraction settings, not calibrated aperture
+corrections. The existing automatic PHOENIX brightness-temperature approximation
+supports only ch1/ch2 and explicitly refuses ch3/ch4. Analysis drivers using
+that step need an independently supplied stellar-response treatment for ch3/ch4;
+extraction support does not imply a ready-to-run complete analysis for them.
 
 Synthetic full-frame and subarray regressions can be run without science data:
 
@@ -313,6 +470,10 @@ interpolation grid transposes the image; it needs separate scientific
 validation before use, so leave `oversamp=False` (the default). When it is
 corrected, `OVERSAMPLE_CACHE_VERSION` in `SPCA/Photometry_Common.py` must be
 incremented so caches from the earlier algorithm are never reused.
+Cache tests use a substitute interpolator and do not validate this routine.
+The PSF high-level call additionally fixes the fitting scale to one; the legacy
+companion interpolator is separate and unvalidated. These defects/validation
+gaps require separate work; use native pixels for the supported paths above.
 Use separate analysis output directories for separate processing-version runs.
 
 SPCA's current image preparation derives masks from the science image and

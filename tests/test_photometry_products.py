@@ -1,6 +1,7 @@
 """Explicit BCD/CBCD selection and minimal correction-stack requirements."""
 
 import unittest
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -22,6 +23,8 @@ from SPCA.Photometry_Common import (
     prepare_image,
 )
 from SPCA.Photometry_Companion import get_fnames as companion_fnames
+
+prepare_image = partial(prepare_image, time_scale="utc")
 
 HEADER = {
     "GAIN": 1.0,

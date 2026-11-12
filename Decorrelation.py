@@ -192,6 +192,7 @@ for iterationNumber in range(len(planets)):
             0.00200,
             3,
             48,
+            t0_format="bjd",  # supplied epoch must be BJD_TDB
         )
     # p0_obj = loadCustomData(rootpath, planet, channel, rp, a, per, t0, inc, e, argp, Tstar, logg, feh,
     #                         rp_err, a_err, t0_err, per_err, inc_err, e_err, argp_err, Tstar_err)

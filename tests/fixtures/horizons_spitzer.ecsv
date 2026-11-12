@@ -1,0 +1,29 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: targetname, unit: '---', datatype: string}
+# - {name: datetime_jd, unit: d, datatype: float64}
+# - {name: datetime_str, unit: '---', datatype: string}
+# - {name: x, unit: AU, datatype: float64}
+# - {name: y, unit: AU, datatype: float64}
+# - {name: z, unit: AU, datatype: float64}
+# - {name: vx, unit: AU / d, datatype: float64}
+# - {name: vy, unit: AU / d, datatype: float64}
+# - {name: vz, unit: AU / d, datatype: float64}
+# - {name: lighttime, unit: d, datatype: float64}
+# - {name: range, unit: AU, datatype: float64}
+# - {name: range_rate, unit: AU / d, datatype: float64}
+# - {name: header_id, datatype: string}
+# meta: !!omap
+# - {observer: Spitzer (-79)}
+# - {center: Solar System barycenter (@0)}
+# - {time_scale: TDB}
+# - {reference_plane: Earth/ICRF}
+# - {aberrations: geometric (none)}
+# - {source: 'https://ssd-api.jpl.nasa.gov/doc/horizons.html'}
+# schema: astropy-2.0
+targetname datetime_jd datetime_str x y z vx vy vz lighttime range range_rate header_id
+"Spitzer Space Telescope (spacecr" 2454773.528351458 "A.D. 2008-Nov-03 00:40:49.5660" 1.017823517202329 0.08319501771912712 0.05269320913739903 -0.001643947788693002 0.01536015425189317 0.006898133485813986 0.005905909318449595 1.022576499550328 -3.117187302666321e-05 ch1-2008-11-03
+"Spitzer Space Telescope (spacecr" 2455517.794248576 "A.D. 2010-Nov-17 07:03:43.0770" 1.018347227688384 0.04701418201277296 0.03654653169838652 -0.001038356579773742 0.0153928989079836 0.006921772158584816 0.005891529953313371 1.020086789655728 -7.91660362790827e-05 ch1-2010-11-17
+"Spitzer Space Telescope (spacecr" 2456638.73546941 "A.D. 2013-Dec-12 05:39:04.5570" 1.021843089818973 0.06377657049624139 0.0440171622752648 -0.001393802161969988 0.01538063007256652 0.006910405776148798 0.005918619369231164 1.024777176624174 -0.0001357825100143588 ch1-2013-12-12
+"Spitzer Space Telescope (spacecr" 2458499.611322974 "A.D. 2019-Jan-16 02:40:18.3050" 1.023494301465951 -0.005036444215689197 0.01293238395594189 1.406811252086008e-05 0.01541814773262606 0.006948810842608633 0.005911753525287521 1.023588392596553 2.599744397176999e-05 ch2-2019-01-16

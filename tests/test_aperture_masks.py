@@ -1,3 +1,5 @@
+from SPCA.irac_timing import timing_metadata
+
 """Exercise real Photutils calls and rejected-frame propagation through SPCA."""
 
 import unittest
@@ -231,6 +233,8 @@ class RejectedFrameTests(unittest.TestCase):
                     "FLUXCONV": 1.0,
                     "FRAMTIME": 1.0,
                     "BMJD_OBS": 54768.0,
+                    "ET_OBS": 300000066.184,
+                    "UTCS_OBS": 300000000.0,
                 }
             )
             y, x = np.mgrid[:32, :32]
@@ -302,6 +306,8 @@ class RejectedFrameTests(unittest.TestCase):
                     "FLUXCONV": 1.0,
                     "FRAMTIME": 1.0,
                     "BMJD_OBS": 54768.0,
+                    "ET_OBS": 300000066.184,
+                    "UTCS_OBS": 300000000.0,
                 }
             )
             fits.PrimaryHDU(frames.data + 10, header).writeto(bcd / "a_bcd.fits")
@@ -319,6 +325,7 @@ class RejectedFrameTests(unittest.TestCase):
                         if supplied:
                             options.update(
                                 image_stack_input=frames,
+                                input_time_metadata=timing_metadata(),
                                 bg=np.full(n, 10.0),
                                 bg_err=np.ones(n),
                                 time=np.arange(n, dtype=float),
@@ -358,6 +365,7 @@ class RejectedFrameTests(unittest.TestCase):
             "savePlots": False,
             "onlyBest": False,
             "image_stack_input": frames,
+            "input_time_metadata": timing_metadata(),
             "bg": np.ones(n),
             "bg_err": np.ones(n),
             "time": np.arange(n, dtype=float),
