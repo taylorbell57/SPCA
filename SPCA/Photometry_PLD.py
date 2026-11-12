@@ -4,7 +4,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.stats import sigma_clip
 
-from .Photometry_Common import bin_array, clip_data, create_folder, prepare_images
+from .irac import aor_tag, aperture_prefix
+from .irac_timing import timing_header, validate_preloaded_time
+from .Photometry_Common import (
+    bin_array,
+    bin_timestamps,
+    clip_data,
+    create_folder,
+    prepare_images,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -85,8 +93,25 @@ def get_lightcurve(
     bg_err=None,
     time=None,
     science_product="bcd",
+    target_coord=None,
+    time_scale="tdb",
+    time_format="bmjd",
+    input_time_metadata=None,
 ):
     """Given a directory, looks for data (bcd.fits files), opens them and performs PLD "photometry".
+
+    Times default to BMJD_TDB. Use time_format="bjd" explicitly for BJD_TDB,
+    or time_scale="utc" for legacy-scale output. target_coord selects the
+    timing direction for both geometries and the full-frame WCS crop.
+    Preloaded arrays require a matching input_time_metadata declaration.
+
+    The shared loader implements ch1-ch4 subarrays and full-frame WCS crops.
+    This method uses native pixels: 3x3 or 5x5 stamps fixed at (15,15), without
+    centroid tracking. Inspect placement, drift and broad PSF coverage for each
+    observation. Synthetic stamp/output checks do not establish full-frame or
+    ch3/ch4 PLD science performance; recent real ch3/ch4 extractions used aperture
+    photometry. Output pixel vectors feed the separate decorrelation model;
+    extraction alone does not correct detector systematics.
 
     Args:
         science_product (str): Select 'bcd' (default) or 'cbcd' when loading images.
@@ -110,7 +135,6 @@ def get_lightcurve(
             frame to remove first-frame systematic).
         maskStars (list, optional): An array-like object where each element is an array-like object with the RA and DEC
             coordinates of a nearby star which should be masked out when computing background subtraction.
-        rerun_photometry (bool, optional): Whether to overwrite old photometry if it exists. Default is False.
 
     Raises:
         Error: If Photometry method is not supported/recognized by this pipeline.
@@ -134,8 +158,8 @@ def get_lightcurve(
         basepath += "/"
 
     # prepare filenames for saved data
-    save_full = channel + "_datacube_full_AORs" + AOR_snip[1:] + ".dat"
-    save_bin = channel + "_datacube_binned_AORs" + AOR_snip[1:] + ".dat"
+    save_full = channel + "_datacube_full_AORs" + aor_tag(AOR_snip) + ".dat"
+    save_bin = channel + "_datacube_binned_AORs" + aor_tag(AOR_snip) + ".dat"
 
     # Access the global variable
     global image_stack
@@ -152,8 +176,14 @@ def get_lightcurve(
             maskStars=maskStars,
             ncpu=ncpu,
             science_product=science_product,
+            target_coord=target_coord,
+            time_scale=time_scale,
+            time_format=time_format,
         )
     else:
+        validate_preloaded_time(
+            input_time_metadata, time_scale, target_coord, time_format
+        )
         image_stack = image_stack_input
 
     bg = clip_data(bg, highpassWidth, sigma1=10, sigma2=5, maxiters=3)
@@ -180,7 +210,7 @@ def get_lightcurve(
         if bin_data:
             print("Binning... ", end="", flush=True)
             binned_P, binned_P_std = bin_array2D(P, bin_size)
-            binned_time, binned_time_std = bin_array(time, bin_size)
+            binned_time, binned_time_std = bin_timestamps(time, P, bin_size)
             binned_bg, binned_bg_std = bin_array(bg, bin_size)
 
             # sigma clip binned data to remove wildly unacceptable data
@@ -196,10 +226,7 @@ def get_lightcurve(
 
         if save or savePlots:
             print("Saving... ", end="", flush=True)
-            if channel == "ch1":
-                folder = "3um"
-            else:
-                folder = "4um"
+            folder = aperture_prefix(channel)
             folder += f"PLD_{stamp_size}x{stamp_size}/"
 
             savepath = basepath + planet + "/analysis/" + channel + "/"
@@ -213,7 +240,12 @@ def get_lightcurve(
                 savepath += "noIgnore/"
 
             # create save folder
-            savepath = create_folder(savepath + folder, True, True)
+            savepath = create_folder(
+                savepath + folder,
+                True,
+                True,
+                products=(save_full, save_bin) if save else (),
+            )
 
         if savePlots or showPlots:
             if bin_data:
@@ -240,7 +272,7 @@ def get_lightcurve(
                     axes[2].plot(
                         plotx, ploty2[:, i], "+", label="$Pstd_" + str(i + 1) + "$"
                     )
-                axes[2].set_xlabel("Time (BMJD)")
+                axes[2].set_xlabel(f"Time ({time_format.upper()}_{time_scale.upper()})")
             fig.subplots_adjust(hspace=0)
 
             if savePlots:
@@ -255,7 +287,20 @@ def get_lightcurve(
             FULL_head = "".join([f"P{i + 1}, " for i in range(int(stamp_size**2))])
             FULL_head += "time, bg"
             pathFULL = savepath + save_full
-            np.savetxt(pathFULL, FULL_data, header=FULL_head)
+            np.savetxt(
+                pathFULL,
+                FULL_data,
+                header=FULL_head
+                + "\n"
+                + timing_header(
+                    time_scale,
+                    target_coord,
+                    time_format,
+                    bin_size=bin_size,
+                    binning="median of timestamps of surviving flux samples",
+                    flux_preprocessing="neighbor-median imputation during clipping",
+                ),
+            )
             if bin_data:
                 BIN_data = np.c_[
                     binned_P,
@@ -269,9 +314,22 @@ def get_lightcurve(
                 BIN_head += "".join(
                     [f"P{i + 1}_std, " for i in range(int(stamp_size**2))]
                 )
-                BIN_head = "time, time_std, bg, bg_std"
+                BIN_head += "time, time_std, bg, bg_std"
                 pathBIN = savepath + save_bin
-                np.savetxt(pathBIN, BIN_data, header=BIN_head)
+                np.savetxt(
+                    pathBIN,
+                    BIN_data,
+                    header=BIN_head
+                    + "\n"
+                    + timing_header(
+                        time_scale,
+                        target_coord,
+                        time_format,
+                        bin_size=bin_size,
+                        binning="median of timestamps of surviving flux samples",
+                        flux_preprocessing="neighbor-median imputation during clipping",
+                    ),
+                )
 
     image_stack = None
 

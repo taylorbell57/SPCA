@@ -1,11 +1,13 @@
 """Synthetic IRAC BCD regressions; no archive/science data are required."""
 
 import unittest
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import matplotlib
+from conftest import add_synthetic_state
 
 matplotlib.use("Agg")
 import numpy as np
@@ -21,6 +23,11 @@ from SPCA.Photometry_Common import (
     prepare_image,
     prepare_images,
 )
+
+# These tests retain explicit UTC to isolate pixel/crop regressions.
+get_time = partial(get_time, time_scale="utc")
+prepare_image = partial(prepare_image, time_scale="utc")
+prepare_images = partial(prepare_images, time_scale="utc")
 
 TARGET = SkyCoord(97.6, 29.7, unit="deg")
 POSITIONS = ((20.3, 27.7), (125.5, 127.8), (130.8, 181.1))
@@ -40,7 +47,7 @@ def image_header(position=POSITIONS[0], time=54768.0):
     ) * (1.22 / 3600)
     h = w.to_header()
     h.update(GAIN=2.0, EXPTIME=3.0, FLUXCONV=1.5, FRAMTIME=4.0, BMJD_OBS=time)
-    return h
+    return add_synthetic_state(h, TARGET)
 
 
 def full_image(position=POSITIONS[0], drift=(0, 0)):
@@ -71,6 +78,9 @@ class FullFrameTests(unittest.TestCase):
         return prepare_images(self.base, "planet", "ch2", "r", ncpu=1, **kwargs)
 
     def test_verified_positions_wcs_origin_axes_units_and_conversion(self):
+        """Recover synthetic sky positions with correct WCS origin, axis order and
+        electron conversion.
+        """
         for n, position in enumerate(POSITIONS):
             path = self.write(n, position=position)
             header = fits.getheader(path)
@@ -95,6 +105,9 @@ class FullFrameTests(unittest.TestCase):
             self.assertAlmostEqual(cy[0], y - crop[0].start, delta=0.15)
 
     def test_distorted_wcs_accuracy_away_from_reference_pixel(self):
+        """Apply celestial distortion when locating targets away from the WCS
+        reference pixel.
+        """
         w = WCS(image_header(POSITIONS[1]))
         w.wcs.ctype = ["RA---TAN-SIP", "DEC--TAN-SIP"]
         a, b = np.zeros((3, 3)), np.zeros((3, 3))
@@ -110,6 +123,7 @@ class FullFrameTests(unittest.TestCase):
             self.assertTrue(15 <= y - crop[0].start < 16)
 
     def test_all_image_boundaries_are_validated_without_shifting(self):
+        """Reject off-detector crops without silently shifting the target stamp."""
         for position in ((15.25, 15.25), (239.75, 239.75)):
             path = self.write(str(position), position=position)
             crop = full_frame_crop(fits.getheader(path), TARGET)
@@ -122,6 +136,7 @@ class FullFrameTests(unittest.TestCase):
                 full_frame_crop(fits.getheader(path), TARGET)
 
     def test_missing_or_invalid_target_and_missing_wcs_fail_clearly(self):
+        """Require finite target coordinates and celestial WCS for full-frame crops."""
         path = self.write(1)
         with self.assertRaisesRegex(ValueError, "require target_coord"):
             self.load()
@@ -136,6 +151,9 @@ class FullFrameTests(unittest.TestCase):
             full_frame_crop(header, TARGET)
 
     def test_fixed_crop_per_aor_retains_drift_and_uses_each_aors_wcs(self):
+        """Fix each AOR crop to its first BCD while retaining subsequent pointing
+        drift.
+        """
         paths, expected, times = [], [], []
         for n, position in enumerate(POSITIONS):
             for i in range(2):
@@ -166,12 +184,14 @@ class FullFrameTests(unittest.TestCase):
             images + bg[:, None, None], np.array(expected)[order]
         )
         self.assertTrue(np.isfinite(bg_err).all())
-        breaks = np.fromstring(
-            (self.root / "planet/analysis/ch2/aorBreaks.txt").read_text(), sep=" "
-        )
-        np.testing.assert_allclose(breaks, sorted(times[::2])[1:], rtol=0, atol=1e-8)
+        breaks = np.loadtxt(self.root / "planet/analysis/ch2/aorBreaks.txt", ndmin=1)
+        expected_breaks = sorted(min(times[i : i + 2]) for i in range(0, 6, 2))[1:]
+        np.testing.assert_allclose(breaks, expected_breaks, rtol=0, atol=1e-8)
 
     def test_bad_pixels_and_full_frame_star_masks_use_crop_offsets(self):
+        """Translate bad pixels and nearby-star masks into the same cropped
+        coordinates.
+        """
         position = POSITIONS[1]
         data = full_image(position)
         data[128, 126], data[120, 118] = np.nan, np.inf
@@ -201,6 +221,7 @@ class FullFrameTests(unittest.TestCase):
         self.assertTrue(np.isnan(flux).all())
 
     def test_full_frame_correction_stack_is_cropped_identically(self):
+        """Subtract correction-stack pixels matching the selected full-frame crop."""
         path = self.write(1)
         correction = np.arange(256 * 256, dtype=float).reshape(256, 256)
         crop = full_frame_crop(fits.getheader(path), TARGET)
@@ -238,6 +259,9 @@ class FullFrameTests(unittest.TestCase):
             )
 
     def test_full_frame_diagnostics_skip_even_64_files_and_exclusions_reject(self):
+        """Skip subarray-position diagnostics for full frames and reject cube-
+        position exclusions.
+        """
         path = self.write(1)
         # Simulate a multiple-of-64 file count without duplicating fixtures.
         with (
@@ -256,6 +280,7 @@ class FullFrameTests(unittest.TestCase):
             )
 
     def test_subarray_pixels_timestamps_masks_and_diagnostics_remain_unchanged(self):
+        """Preserve native subarray pixels, frame exclusions and diagnostic dispatch."""
         y, x = np.mgrid[:32, :32]
         data = np.repeat((10 + (-1.0) ** (x + y))[None], 64, axis=0)
         data[:, 15, 15] += 100
@@ -269,9 +294,11 @@ class FullFrameTests(unittest.TestCase):
                 for key in ("GAIN", "EXPTIME", "FLUXCONV", "FRAMTIME", "BMJD_OBS")
             }
         )
+        calibration["FRAMTIME"] = 2.0
+        add_synthetic_state(calibration, TARGET)
         fits.PrimaryHDU(data, calibration).writeto(path, overwrite=True)
         header = fits.getheader(path)
-        expected_time = np.linspace(54768 + 2 / 86400, 54768 + 63 * 4 / 86400, 64)
+        expected_time = 54768 + ((np.arange(64) + 0.5) * 2 + 0.003231) / 86400
         np.testing.assert_array_equal(get_time(header, []), expected_time)
         before = prepare_image(self.base, "r", [path], [1], ignoreFrames=[1])
         after = prepare_image(
@@ -296,6 +323,9 @@ class FullFrameTests(unittest.TestCase):
         extract.assert_called_once()
 
     def test_end_to_end_baseline_radii_centroids_and_output_products(self):
+        """Exercise full-frame preparation, aperture selection and saved photometry
+        together.
+        """
         for i in range(11):
             self.write(
                 1,
@@ -305,6 +335,7 @@ class FullFrameTests(unittest.TestCase):
                 time=54768 + i * 4 / 86400,
             )
         options = dict(
+            time_scale="utc",
             target_coord=TARGET,
             r=[2, 2.5],
             edges=["Exact", "Hard"],

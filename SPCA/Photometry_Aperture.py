@@ -15,9 +15,12 @@ from photutils.aperture import (
 from photutils.utils import calc_total_error
 from tqdm import tqdm
 
+from .irac import aor_tag, aperture_prefix, validate_channel
+from .irac_timing import timing_header, validate_preloaded_time
 from .Photometry_Common import (
     _get_pool,
     bin_array,
+    bin_timestamps,
     clip_data,
     create_folder,
     highpassflist,
@@ -425,10 +428,7 @@ def compare_RMS(
             if not os.path.exists(figpath):
                 os.makedirs(figpath)
 
-            if channel == "ch2":
-                fname = figpath + "4um"
-            else:
-                fname = figpath + "3um"
+            fname = figpath + aperture_prefix(channel)
             fname += "_Photometry_Comparison.pdf"
 
             plt.savefig(fname)
@@ -600,14 +600,33 @@ def get_lightcurve(
     time=None,
     science_product="bcd",
     target_coord=None,
+    time_scale="tdb",
+    background_bounds=(11, 19, 11, 19),
+    centroid_bounds=(13, 18, 13, 18),
+    time_format="bmjd",
+    input_time_metadata=None,
 ):
     """Given a directory, looks for data (bcd.fits files), opens them and performs photometry.
+
+    Ch1-ch4 use native subarray stamps or fixed 32x32 WCS crops from full
+    frames. Full frames require target coordinates and no cube-position
+    exclusions. centroid_bounds/background_bounds are channel-independent
+    defaults; inspect windows for broad PSFs and pointing drift. Radius/edge
+    searches rank measured RMS, not calibrated scientific accuracy.
+    Synthetic extraction covers all four channels; real ch3/ch4 checks were
+    limited to a few BCDs and short aperture runs, not complete event analyses.
+    Full output has 8 columns (no saved aperture-flux uncertainty); bins have
+    16 columns with population scatter. Keep oversamp=False until the common
+    interpolation routine is repaired and validated.
 
     Args:
         science_product (str): Select 'bcd' (default) or 'cbcd' when loading images.
         target_coord (SkyCoord or pair): Target RA/Dec in degrees for a fixed
-            WCS-based 32x32 crop per full-frame AOR. Ignored for subarray cubes
-            and image_stack_input. Required when loading full-frame images.
+            WCS crop per full-frame AOR and timing direction for both geometries.
+            Required for full-frame loading; optional for subarray timing.
+        time_scale (str): "tdb" by default; explicit "utc" for legacy-scale output.
+        time_format (str): "bmjd" by default, or explicitly "bjd".
+        input_time_metadata (dict): Required declaration for preloaded arrays.
         datapath (string): Directory where the spitzer data is stored.
         savepath (string): Directory the outputs will be saved.
         AORsnip (string):  Common first characters of data directory eg. 'r579'
@@ -645,7 +664,6 @@ def get_lightcurve(
         moveCentroids (iterable, optional): True centers each aperture on its
             frame's flux-weighted centroid. Missing/clipped centroids produce
             NaN fluxes. False uses the median valid centroid. Default is [True].
-        rerun_photometry (bool, optional): Whether to overwrite old photometry if it exists. Default is False.
         ncpu (int, optional): The number of aperture radii to try at the same time with multiprocessing. Default is 4.
 
     Raises:
@@ -658,6 +676,16 @@ def get_lightcurve(
         not a propagated formal uncertainty, and is zero for a single sample.
 
     """
+
+    validate_channel(channel)
+    from .timing_correction import assert_reduction_tree
+
+    if save:
+        assert_reduction_tree(
+            os.path.join(basepath, planet, "analysis", channel, "bestPhOption.txt")
+        )
+    if time_scale not in ("utc", "tdb"):
+        raise ValueError("time_scale must be utc or tdb")
 
     # Currently only circular apertures are supported!
     shape = "Circular"
@@ -686,8 +714,8 @@ def get_lightcurve(
         savepath += "noIgnore/"
 
     # prepare filenames for saved data
-    save_full = channel + "_datacube_full_AORs" + AOR_snip[1:] + ".dat"
-    save_bin = channel + "_datacube_binned_AORs" + AOR_snip[1:] + ".dat"
+    save_full = channel + "_datacube_full_AORs" + aor_tag(AOR_snip) + ".dat"
+    save_bin = channel + "_datacube_binned_AORs" + aor_tag(AOR_snip) + ".dat"
 
     if not isinstance(r, Iterable):
         r = [r]
@@ -738,8 +766,14 @@ def get_lightcurve(
             ncpu,
             science_product=science_product,
             target_coord=target_coord,
+            time_scale=time_scale,
+            time_format=time_format,
+            background_bounds=background_bounds,
         )
     else:
+        validate_preloaded_time(
+            input_time_metadata, time_scale, target_coord, time_format
+        )
         image_stack = image_stack_input
 
     #     image_stack, bg, bg_err, time = prepare_images(basepath, planet, channel, AOR_snip, ignoreFrames,
@@ -759,11 +793,13 @@ def get_lightcurve(
 
     # get centroids & PSF width
     print("\tGetting centroids... ", end="", flush=True)
-    xo, yo, xw, yw = centroid_FWM(image_stack, highpassWidth=5 * 64, scale=scale)
+    xo, yo, xw, yw = centroid_FWM(
+        image_stack, highpassWidth=5 * 64, scale=scale, bounds=centroid_bounds
+    )
 
     # Compute noise pixel parameter for each frame
     print("Getting noise pixel parameter... ", end="", flush=True)
-    npp = noisepixparam(image_stack)
+    npp = noisepixparam(image_stack, bounds=centroid_bounds)
 
     npp = clip(npp)
     xo = clip(xo)
@@ -826,6 +862,8 @@ def get_lightcurve(
     image_stack = None
 
     fluxes = np.ma.masked_invalid(np.array(results))
+    time = np.ma.masked_invalid(np.ma.asarray(time))
+    fluxes[np.ma.getmaskarray(time), :] = np.ma.masked
     # Free up some RAM
     results = None
 
@@ -846,10 +884,7 @@ def get_lightcurve(
     for moveCentroid in moveCentroids:
         for edge in edges:
             for r_tmp in r:
-                if channel == "ch1":
-                    folder = "3um"
-                else:
-                    folder = "4um"
+                folder = aperture_prefix(channel)
                 folder += edge + shape + "_".join(str(np.round(r_tmp, 2)).split("."))
                 if moveCentroid:
                     folder += "_movingCentroid"
@@ -857,6 +892,16 @@ def get_lightcurve(
                 all_moveCentroids.append(moveCentroid)
                 all_edges.append(edge)
                 all_rs.append(r_tmp)
+
+    # Check before RMS ranking appends selection metadata. A new dataset may
+    # reuse a technique directory, but an existing science pair is immutable.
+    if save:
+        for technique in techniques:
+            for name in (save_full, save_bin):
+                destination = os.path.join(technique, name)
+                assert_reduction_tree(destination)
+                if os.path.lexists(destination):
+                    raise FileExistsError(f"Photometry already exists: {destination}")
 
     BIN_datas = []
     if bin_data:
@@ -870,10 +915,9 @@ def get_lightcurve(
             # Bin metadata from the same surviving frames as this flux series.
             binned = [
                 bin_array(np.ma.masked_where(np.ma.getmaskarray(flux), data), bin_size)
-                for data in (time, xo, yo, xw, yw, bg, npp)
+                for data in (xo, yo, xw, yw, bg, npp)
             ]
             (
-                (binned_time, binned_time_std),
                 (binned_xo, binned_xo_std),
                 (binned_yo, binned_yo_std),
                 (binned_xw, binned_xw_std),
@@ -881,6 +925,7 @@ def get_lightcurve(
                 (binned_bg, binned_bg_std),
                 (binned_npp, binned_npp_std),
             ) = binned
+            binned_time, binned_time_std = bin_timestamps(time, flux, bin_size)
             BIN_data = bin_all_data(
                 highpassWidth_tmp,
                 flux,
@@ -928,6 +973,11 @@ def get_lightcurve(
         savePlots,
     )
     if not np.any(np.isfinite(RMSs)):
+        if onlyBest and save:
+            raise ValueError(
+                "No valid aperture can be ranked; refusing to save an entire "
+                "aperture grid with onlyBest=True"
+            )
         print("No photometry method has enough valid measurements to rank.")
 
     if onlyBest and np.any(np.isfinite(RMSs)):
@@ -950,10 +1000,7 @@ def get_lightcurve(
         if save or savePlots:
             print("\tSaving... ", end="", flush=True)
             # create save folder
-            if channel == "ch1":
-                folder = "3um"
-            else:
-                folder = "4um"
+            folder = aperture_prefix(channel)
             folder += (
                 all_edges[i] + shape + "_".join(str(np.round(all_rs[i], 2)).split("."))
             )
@@ -963,7 +1010,12 @@ def get_lightcurve(
 
             savepath_tmp = savepath + folder
 
-            savepath_tmp = create_folder(savepath_tmp, True, True)
+            savepath_tmp = create_folder(
+                savepath_tmp,
+                True,
+                True,
+                products=(save_full, save_bin) if save else (),
+            )
 
         # Plot the photometry if requested
         if savePlots or showPlots:
@@ -1001,7 +1053,7 @@ def get_lightcurve(
             axes[4].set_ylabel("$y_w$")
 
             fig.subplots_adjust(hspace=0)
-            axes[4].set_xlabel("Time (BMJD))")
+            axes[4].set_xlabel(f"Time ({time_format.upper()}_{time_scale.upper()})")
             axes[4].ticklabel_format(useOffset=False)
 
             if savePlots:
@@ -1018,12 +1070,21 @@ def get_lightcurve(
                 "Flux, Time, x-centroid, y-centroid, x-PSF width, y-PSF width, bg flux"
             )
             FULL_head += ", Noise Pixel Parameter"
+            time_label = "\n" + timing_header(
+                time_scale,
+                target_coord,
+                time_format,
+                bin_size=bin_size,
+                bin_mask="finite_flux",
+            )
+            FULL_head += time_label
             pathFULL = savepath_tmp + save_full
             np.savetxt(pathFULL, FULL_data, header=FULL_head)
             if bin_data:
                 BIN_head = "Flux, Flux std, Time, Time std, x-centroid, x-centroid std, y-centroid, y-centroid std"
                 BIN_head += ", x-PSF width, x-PSF width std, y-PSF width, y-PSF width std, bg flux, bg flux std"
                 BIN_head += ", Noise Pixel Parameter, Noise Pixel Parameter std"
+                BIN_head += time_label
                 pathBIN = savepath_tmp + save_bin
                 np.savetxt(pathBIN, BIN_datas[i], header=BIN_head)
         else:
@@ -1048,6 +1109,7 @@ import unittest
 class TestAperturehotometryMethods(unittest.TestCase):
     # Test that centroiding gives the expected values and doesn't swap x and y
     def test_FWM_centroiding(self):
+        """Recover independent x/y centroids without swapping image axes."""
         fake_images = np.zeros((4, 32, 32))
         for i in range(fake_images.shape[0]):
             fake_images[i, 14 + i, 15] = 2
@@ -1057,6 +1119,9 @@ class TestAperturehotometryMethods(unittest.TestCase):
 
     # Test that circular aperture photometry properly follows the input centroids and gives the expected values
     def test_circularAperture(self):
+        """Follow moving source centroids and recover total flux at each tested
+        aperture radius.
+        """
         image_stack = np.zeros((4, 32, 32))
 
         for i in range(image_stack.shape[0]):

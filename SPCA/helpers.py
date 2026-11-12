@@ -8,6 +8,8 @@ import numpy as np
 import scipy.optimize as spopt
 from astropy.stats import sigma_clip
 
+from SPCA.irac_timing import model_times, read_timing
+
 lib_path = os.path.abspath(os.path.join("../"))
 sys.path.append(lib_path)
 
@@ -23,6 +25,7 @@ def signal_params():
 
     p0_obj = {
         "name": "planet",
+        "time_convention": "BMJD_TDB",
         "t0": 0.0,
         "t0_err": 0.0,
         "per": 1.0,
@@ -174,6 +177,18 @@ def signal_params():
     return p0_obj
 
 
+def require_matching_times(first, first_column, second, second_column):
+    """Do not join fluxes/centroids by row across different time bases or bins."""
+    a, b = read_timing(first), read_timing(second)
+    for key in ("version", "scale", "barycentric", "target_icrs_deg"):
+        if a.get(key) != b.get(key):
+            raise ValueError("Cannot mix photometry timing conventions")
+    x = model_times(first, np.loadtxt(first, usecols=first_column))
+    y = model_times(second, np.loadtxt(second, usecols=second_column))
+    if x.shape != y.shape or not np.allclose(x, y, rtol=0, atol=5e-10, equal_nan=True):
+        raise ValueError("Combined photometry must have identical time rows/bins")
+
+
 def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", cut=0):
     """Retrieve binned data.
 
@@ -185,7 +200,7 @@ def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", 
 
     Returns:
         tuple: flux (ndarray; Flux extracted for each frame),
-            time (ndarray; Time stamp for each frame),
+            time (ndarray; Absolute BMJD_TDB timestamp for each frame),
             xdata (ndarray; X-coordinate of the centroid for each frame),
             ydata (ndarray; Y-coordinate of the centroid for each frame),
             psfwx (ndarray; X-width of the target's PSF for each frame),
@@ -207,7 +222,8 @@ def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", 
         )  # electrons
         time = np.loadtxt(
             foldername + filename, usecols=[int(2 * npix**2)], skiprows=1
-        )  # BMJD
+        )  # BMJD_TDB after declared format conversion
+        time = model_times(foldername + filename, time)
 
         stamp = stamp[cut:]
         time_pld = time[cut:]
@@ -216,13 +232,20 @@ def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", 
         # Convert masks into which indices to keep
         mask_pld = np.logical_not(sigma_clip(stamp.sum(axis=1), sigma=6).mask)
 
+    if "pldaper" in mode.lower():
+        require_matching_times(
+            foldername + filename, int(2 * npix**2), foldername_aper + filename, 2
+        )
     if "pldaper" in mode.lower() or "pld" not in mode.lower():
         if "pld" not in mode.lower():
             foldername_aper = foldername
         flux = np.loadtxt(
             foldername_aper + filename, usecols=[0], skiprows=1
         )  # electrons
-        time = np.loadtxt(foldername_aper + filename, usecols=[2], skiprows=1)  # BMJD
+        time = model_times(
+            foldername_aper + filename,
+            np.loadtxt(foldername_aper + filename, usecols=[2], skiprows=1),
+        )
         xdata = np.loadtxt(foldername_aper + filename, usecols=[4], skiprows=1)  # pixel
         ydata = np.loadtxt(foldername_aper + filename, usecols=[6], skiprows=1)  # pixel
         psfxw = np.loadtxt(foldername_aper + filename, usecols=[8], skiprows=1)  # pixel
@@ -263,7 +286,11 @@ def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", 
         mask_aper = np.logical_not(MASK)
 
     if "psfx" in mode.lower():
-        foldername_psf = "/".join(foldername.split("/")[:-2]) + "/" + foldername_psf
+        if not os.path.isabs(foldername_psf):
+            foldername_psf = os.path.join(
+                os.path.dirname(foldername.rstrip("/")), foldername_psf
+            )
+        require_matching_times(foldername + filename, 2, foldername_psf + filename, 2)
         xdata = np.loadtxt(foldername_psf + filename, usecols=[4], skiprows=1)  # pixel
         ydata = np.loadtxt(foldername_psf + filename, usecols=[6], skiprows=1)  # pixel
         psfxw = np.loadtxt(foldername_psf + filename, usecols=[8], skiprows=1)  # pixel
@@ -313,6 +340,10 @@ def get_data(foldername, filename, mode, foldername_aper="", foldername_psf="", 
         # Normalize stamp pixel values by the sum of the stamp
         stamp /= np.sum(stamp, axis=0)
 
+    if "pldaper" in mode.lower():
+        require_matching_times(
+            foldername + filename, int(2 * npix**2), foldername_aper + filename, 2
+        )
     if "pldaper" in mode.lower() or "pld" not in mode.lower():
         flux = flux[mask]
         time = time[mask]
@@ -364,7 +395,7 @@ def get_full_data(
 
     Returns:
         tuple: flux (ndarray; Flux extracted for each frame),
-            time (ndarray; Time stamp for each frame),
+            time (ndarray; Absolute BMJD_TDB timestamp for each frame),
             xdata (ndarray; X-coordinate of the centroid for each frame),
             ydata (ndarray; Y-coordinate of the centroid for each frame),
             psfwx (ndarray; X-width of the target's PSF for each frame),
@@ -386,7 +417,8 @@ def get_full_data(
         )  # electrons
         time = np.loadtxt(
             foldername + filename, usecols=[int(npix**2)], skiprows=1
-        )  # BMJD
+        )  # BMJD_TDB after declared format conversion
+        time = model_times(foldername + filename, time)
 
         order = np.argsort(time)
         stamp = stamp[order][int(cut * nFrames) :]
@@ -397,24 +429,35 @@ def get_full_data(
         # Convert masks into which indices to keep
         mask_pld = np.logical_not(MASK)
 
+    if "pldaper" in mode.lower():
+        require_matching_times(
+            foldername + filename, int(npix**2), foldername_aper + filename, 1
+        )
     if "pldaper" in mode.lower() or "pld" not in mode.lower():
         if "pld" not in mode.lower():
             foldername_aper = foldername
         flux = np.loadtxt(
             foldername_aper + filename, usecols=[0], skiprows=1
         )  # electrons
-        time = np.loadtxt(foldername_aper + filename, usecols=[1], skiprows=1)  # hours
+        # Companion full products carry flux uncertainty before their time column.
+        time_column = read_timing(foldername_aper + filename).get("time_column", 1)
+        if time_column not in (1, 2):
+            raise ValueError("Unsupported full photometry time-column schema")
+        time = model_times(
+            foldername_aper + filename,
+            np.loadtxt(foldername_aper + filename, usecols=[time_column], skiprows=1),
+        )
         xdata = np.loadtxt(
-            foldername_aper + filename, usecols=[2], skiprows=1
+            foldername_aper + filename, usecols=[time_column + 1], skiprows=1
         )  # pixels
         ydata = np.loadtxt(
-            foldername_aper + filename, usecols=[3], skiprows=1
+            foldername_aper + filename, usecols=[time_column + 2], skiprows=1
         )  # pixels
         psfxw = np.loadtxt(
-            foldername_aper + filename, usecols=[4], skiprows=1
+            foldername_aper + filename, usecols=[time_column + 3], skiprows=1
         )  # pixels
         psfyw = np.loadtxt(
-            foldername_aper + filename, usecols=[5], skiprows=1
+            foldername_aper + filename, usecols=[time_column + 4], skiprows=1
         )  # pixels
 
         order = np.argsort(time)
@@ -454,7 +497,11 @@ def get_full_data(
         mask_aper = np.logical_not(MASK)
 
     if "psfx" in mode.lower():
-        foldername_psf = "/".join(foldername.split("/")[:-2]) + "/" + foldername_psf
+        if not os.path.isabs(foldername_psf):
+            foldername_psf = os.path.join(
+                os.path.dirname(foldername.rstrip("/")), foldername_psf
+            )
+        require_matching_times(foldername + filename, 1, foldername_psf + filename, 1)
         xdata = np.loadtxt(foldername_psf + filename, usecols=[2], skiprows=1)  # pixels
         ydata = np.loadtxt(foldername_psf + filename, usecols=[3], skiprows=1)  # pixels
         psfxw = np.loadtxt(foldername_psf + filename, usecols=[4], skiprows=1)  # pixels
@@ -504,6 +551,10 @@ def get_full_data(
         # Normalize stamp pixel values by the sum of the stamp
         stamp /= np.sum(stamp, axis=0)
 
+    if "pldaper" in mode.lower():
+        require_matching_times(
+            foldername + filename, int(npix**2), foldername_aper + filename, 1
+        )
     if "pldaper" in mode.lower() or "pld" not in mode.lower():
         flux = flux[mask]
         time = time[mask]

@@ -8,7 +8,7 @@ from matplotlib.ticker import MaxNLocator
 
 # SPCA libraries
 from .Photometry_Aperture import get_lightcurve
-from .Photometry_Common import create_folder, get_fnames
+from .Photometry_Common import create_folder, get_fnames, get_time
 
 warnings.filterwarnings("ignore")
 
@@ -25,8 +25,19 @@ def run_diagnostics(
     showPlot=False,
     savePlot=True,
     science_product="bcd",
+    time_scale="tdb",
+    target_coord=None,
+    time_format="bmjd",
+    background_bounds=(11, 19, 11, 19),
+    centroid_bounds=(13, 18, 13, 18),
 ):
     """Run frame diagnostics and choose which frames within a datacube are consistently bad and should be discarded.
+
+    Only selections composed entirely of 64x32x32 cubes support these
+    frame-position statistics. Other geometries return [] without extraction;
+    this means diagnostics were skipped, not that full-frame data are clean.
+    Interleaved/overlapping cubes are rejected. The shared aperture path accepts
+    all four channels, but no new detector-specific artifact diagnosis is added.
 
     Args:
         planet (string): The name of the planet.
@@ -51,6 +62,7 @@ def run_diagnostics(
     fnames, _ = get_fnames(datapath, AOR_snip, science_product)
     if not fnames:
         raise ValueError(f"No *_{science_product}.fits images found in {datapath}")
+    cube_times = []
     for fname in fnames:
         header = fits.getheader(fname)
         if (
@@ -63,6 +75,19 @@ def run_diagnostics(
                 "Skipping cube-position diagnostics: data are not exclusively 64x32x32 subarrays."
             )
             return []
+        cube_times.append(
+            get_time(
+                header,
+                time_scale=time_scale,
+                target_coord=target_coord,
+                time_format=time_format,
+            )
+        )
+    # Reshaping only represents cube positions if chronological sorting keeps
+    # each complete cube intact. Reject overlapping/interleaved inventories.
+    order = np.argsort(np.concatenate(cube_times), kind="stable")
+    if not np.all(order.reshape(-1, 64) % 64 == np.arange(64)):
+        raise ValueError("Overlapping cubes cannot support frame-position diagnostics")
 
     # get lightcurve, centroids, psf width, npp
     flux, time, xo, yo, xw, yw, bg, npp = get_lightcurve(
@@ -82,6 +107,11 @@ def run_diagnostics(
         highpassWidth=highpassWidth,
         ncpu=ncpu,
         science_product=science_product,
+        time_scale=time_scale,
+        target_coord=target_coord,
+        time_format=time_format,
+        background_bounds=background_bounds,
+        centroid_bounds=centroid_bounds,
     )[0].T
     # sigma clipping & reshape
     try:

@@ -1,3 +1,6 @@
+# Time contract: absolute input time, t0, t_sec and break epochs are BMJD_TDB.
+# Relative coordinates below are days from the explicitly subtracted epoch
+# (e.g. time[0] for the detector slope), never an instrument uptime.
 import numpy as np
 
 from . import bliss

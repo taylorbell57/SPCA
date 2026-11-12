@@ -254,6 +254,9 @@ class ProductProfileTests(Fixture):
         )
 
     def test_profiles_select_exact_science_version(self):
+        """Select exact profile products and label only the requested processing
+        version as science.
+        """
         for product in ("bcd", "cbcd"):
             with self.subTest(product=product):
                 spca = self.profile_plan("spca", product)
@@ -295,11 +298,13 @@ class ProductProfileTests(Fixture):
         )
 
     def test_missing_selected_version_is_error(self):
+        """Fail planning when the requested BCD/CBCD version is unavailable."""
         self.client.query_sia.return_value = sia_products([(1, "bcd", "a_bcd.fits")])
         with self.assertRaisesRegex(ArchiveError, r"No \*_cbcd.fits science images"):
             self.profile_plan("spca", "cbcd")
 
     def test_default_selection_is_spca_bcd(self):
+        """Default to BCD science images plus sky-dark lookup files."""
         plan = plan_download(
             self.observations(), self.root, channels=[1], client=self.client
         )
@@ -307,6 +312,9 @@ class ProductProfileTests(Fixture):
         self.assertEqual(set(plan["filename"]), {"a_bcd.fits", "a_sdark.fits"})
 
     def test_invalid_profile_combinations_rejected_before_archive_query(self):
+        """Reject unsupported profiles and processing versions before querying the
+        archive.
+        """
         for kwargs in (
             {"profile": "unknown"},
             {"science_product": "both"},
@@ -322,6 +330,9 @@ class ProductProfileTests(Fixture):
             plan_download(self.observations(), self.root, ancillary=False)
 
     def test_plan_without_recorded_selection_is_rejected(self):
+        """Require persisted product-selection metadata before executing a download
+        plan.
+        """
         plan = self.profile_plan("archive")
         plan.meta.pop("profile")
         plan.meta.pop("science_product")
@@ -331,6 +342,9 @@ class ProductProfileTests(Fixture):
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP tests")
     def test_inventory_comparison_and_profile_changes_preserve_files(self):
+        """Reuse verified downloads across profile changes and compare only the
+        requested products.
+        """
         self.client.session.get.return_value = response(image_bytes())
         inventory = download_plan(self.profile_plan("archive"), client=self.client)
         original = set(inventory["local_path"])
@@ -370,6 +384,7 @@ class ProductProfileTests(Fixture):
                     self.assertEqual(result["missing_files"][0], 0)
 
     def test_discovery_counts_versions_as_one_exposure(self):
+        """Count BCD and CBCD as versions of one exposure in discovery summaries."""
         found = self.discover(channels=[1])
         self.assertEqual(list(found["science_exposures"]), [1])
         self.assertEqual(list(found["bcd_files"]), [1])
@@ -377,6 +392,9 @@ class ProductProfileTests(Fixture):
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP tests")
     def test_archive_with_both_versions_counts_one_science_image(self):
+        """Keep both archive versions while counting only the selected version as
+        science.
+        """
         self.client.session.get.return_value = response(image_bytes())
         for product in ("bcd", "cbcd"):
             with self.subTest(product=product):
@@ -404,6 +422,9 @@ class ProductProfileTests(Fixture):
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP tests")
     def test_switching_versions_with_both_downloaded_relabels_without_requests(self):
+        """Relabel verified versions locally when changing selection without issuing
+        new requests.
+        """
         self.client.session.get.return_value = response(image_bytes())
         download_plan(self.profile_plan("spca", "bcd"), client=self.client)
         download_plan(self.profile_plan("spca", "cbcd"), client=self.client)
@@ -428,6 +449,9 @@ class ProductProfileTests(Fixture):
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP tests")
     def test_profile_journal_recovery_preserves_selection(self):
+        """Recover interrupted transfers without losing the selected profile and
+        science version.
+        """
         for selection in (DEFAULT, ("spca", "cbcd"), ("science-qa", "bcd")):
             with self.subTest(selection=selection):
                 self.recover_after_kill(*selection)
@@ -474,6 +498,9 @@ class ProductProfileTests(Fixture):
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP tests")
     def test_switching_science_version_retains_verified_files(self):
+        """Keep verified original versions when downloading the alternative
+        processing product.
+        """
         self.client.session.get.return_value = response(image_bytes())
         first = download_plan(self.profile_plan("spca"), client=self.client)
         self.client.session.get.reset_mock()
@@ -485,6 +512,7 @@ class ProductProfileTests(Fixture):
 
 class DiscoveryTests(Fixture):
     def test_explicit_coordinates_bypass_resolver(self):
+        """Use supplied sky coordinates without a target-name resolution request."""
         with patch.object(
             SkyCoord, "from_name", side_effect=AssertionError("resolver called")
         ):
@@ -499,6 +527,9 @@ class DiscoveryTests(Fixture):
         self.assertEqual(found["time_coverage"][0], "full_mission")
 
     def test_name_resolution_failure_is_actionable(self):
+        """Report target resolution failure with guidance to supply explicit
+        coordinates.
+        """
         from astropy.coordinates.name_resolve import NameResolveError
 
         failure = NameResolveError("unavailable")
@@ -507,11 +538,15 @@ class DiscoveryTests(Fixture):
             discover_observations(target="WASP-12b", client=self.client)
 
     def test_sia_requires_coordinates(self):
+        """Require a sky position before issuing a positional SIA query."""
         with self.assertRaisesRegex(ValueError, "coordinates"):
             discover_observations(aorkeys=[1234501], client=self.client)
         self.client.query_sia.assert_not_called()
 
     def test_pid_and_aor_lists_filter_positional_results(self):
+        """Intersect positional discovery results with explicit program and AOR
+        selections.
+        """
         self.client.query_sia.return_value = vstack(
             [
                 sia_products([(1, "bcd", "a_bcd.fits")]),
@@ -525,6 +560,9 @@ class DiscoveryTests(Fixture):
         self.assertEqual(list(found["pid"]), ["70060"])
 
     def test_sia_expands_aor_with_time_window_and_finds_other_channels(self):
+        """Expand a selected AOR's time window to discover its complete channel
+        coverage.
+        """
         initial = sia_products([(1, "bcd", "a_bcd.fits")])
         expanded = sia_products(
             [
@@ -566,6 +604,9 @@ class DiscoveryTests(Fixture):
         self.assertNotIn("service", found.meta)
 
     def test_sia_aor_comes_from_hex_obs_id_not_cal_directory(self):
+        """Decode the science AOR from obs_id rather than an ancillary calibration
+        path.
+        """
         self.client.query_sia.return_value = sia_products(
             [(2, "bcd", "a_bcd.fits"), (2, "cal", "SPITZER_I2_68573184_sdark.fits")],
             aor="66692096",
@@ -575,6 +616,9 @@ class DiscoveryTests(Fixture):
         self.assertEqual(found["other_ancillary_files"][0], 1)
 
     def test_truncated_sia_queries_are_split_in_time(self):
+        """Split truncated time queries until all returned exposure records can be
+        retained.
+        """
         from SPCA.spitzer_download import MISSION_MJD, SiaOverflow
 
         middle = sum(MISSION_MJD) / 2
@@ -589,6 +633,9 @@ class DiscoveryTests(Fixture):
         )
 
     def test_unsplittable_truncation_is_an_error(self):
+        """Reject unresolved SIA truncation instead of reporting a partial result as
+        complete.
+        """
         from SPCA.spitzer_download import SiaOverflow
 
         self.client.query_sia.side_effect = SiaOverflow("limit")
@@ -596,6 +643,9 @@ class DiscoveryTests(Fixture):
             self.discover(start="2008-10-29T00:00:00", end="2008-10-29T00:00:05")
 
     def test_date_bounds_constrain_sia_server_query(self):
+        """Send explicit date limits to SIA rather than filtering an unrestricted
+        result locally.
+        """
         self.client.query_sia.return_value = sia_products([(3, "bcd", "a_bcd.fits")])
         self.discover(start="2008-01-01", end="2008-12-31")
         low, high = self.client.query_sia.call_args_list[0].kwargs["time"]
@@ -605,6 +655,9 @@ class DiscoveryTests(Fixture):
         self.assertEqual(self.client.query_sia.call_count, 2)
 
     def test_filters_intersect_and_dates_select_whole_aor(self):
+        """Apply selection filters jointly while retaining whole AORs that overlap
+        the date window.
+        """
         self.client.query_sia.return_value = vstack(
             [
                 sia_products([(1, "bcd", "before_bcd.fits", 54466.5)]),
@@ -624,11 +677,17 @@ class DiscoveryTests(Fixture):
         self.assertTrue(str(found["date"][0]).startswith("2008-01-01"))
 
     def test_unmatched_filters_return_empty_metadata_table(self):
+        """Return a typed empty observation table when no record matches the
+        selection.
+        """
         found = self.discover(pids=[70060])
         self.assertEqual(len(found), 0)
         self.assertEqual(found.meta["completeness"], "unverified")
 
     def test_missing_pid_required_by_filter_is_error(self):
+        """Reject program filtering when archive records lack the required program
+        identity.
+        """
         table = sia_products([(1, "bcd", "a_bcd.fits")])
         table["proposal_id"] = MaskedColumn(table["proposal_id"], mask=[True])
         self.client.query_sia.return_value = table
@@ -636,6 +695,9 @@ class DiscoveryTests(Fixture):
             self.discover(pids=[50517])
 
     def test_missing_optional_metadata_is_not_stringified_mask(self):
+        """Preserve missing optional metadata without converting masked values into
+        strings.
+        """
         table = sia_products([(1, "bcd", "a_bcd.fits")])
         for name in ("proposal_id", "instrument_keywords"):
             table[name] = MaskedColumn(table[name], mask=[True])
@@ -645,6 +707,9 @@ class DiscoveryTests(Fixture):
         self.assertEqual(str(found["mode"][0]), "subarray")
 
     def test_missing_dates_required_by_filter_is_error(self):
+        """Reject date filtering when archive records cannot establish observation
+        dates.
+        """
         table = sia_products([(1, "bcd", "a_bcd.fits")])
         table.remove_columns(["t_min", "t_max"])
         self.client.query_sia.return_value = table
@@ -652,6 +717,9 @@ class DiscoveryTests(Fixture):
             self.discover(aorkeys=[1234501], start="2008-01-01")
 
     def test_channel_identification(self):
+        """Recognize IRAC channel identities from supported archive metadata
+        representations.
+        """
         for band, channel in [("IRAC1", 1), ("4.5", 2), ("5.8 um", 3), ("8.0", 4)]:
             row = Table(
                 rows=[("IRAC", band)], names=("instrument_name", "energy_bandpassname")
@@ -663,6 +731,7 @@ class DiscoveryTests(Fixture):
         self.assertIsNone(identify_channel(row))
 
     def test_conflicting_channels_fail(self):
+        """Reject archive records containing inconsistent channel identities."""
         row = Table(
             rows=[("IRAC", "IRAC1", "3")],
             names=("instrument_name", "energy_bandpassname", "channel"),
@@ -671,12 +740,16 @@ class DiscoveryTests(Fixture):
             identify_channel(row)
 
     def test_sia_aor_can_be_identified_from_archive_path(self):
+        """Recover missing AOR identity from a supported science archive path."""
         table = sia_products([(1, "bcd", "a_bcd.fits")])
         table.remove_column("obs_id")
         self.client.query_sia.return_value = table
         self.assertEqual(list(self.discover()["aorkey"]), ["1234501"])
 
     def test_sia_without_aor_does_not_silently_omit(self):
+        """Report unidentified AOR records instead of silently dropping possible
+        science exposures.
+        """
         self.client.query_sia.return_value = Table(
             rows=[("IRAC", "IRAC1")], names=("instrument_name", "energy_bandpassname")
         )
@@ -684,6 +757,7 @@ class DiscoveryTests(Fixture):
             self.discover()
 
     def test_invalid_selection_rejected_before_network(self):
+        """Validate channels and selectors before making network requests."""
         for kwargs in (
             {"channels": [5]},
             {"radius": -1 * u.arcmin},
@@ -695,6 +769,7 @@ class DiscoveryTests(Fixture):
         self.client.query_sia.assert_not_called()
 
     def test_requested_aor_without_match_is_reported(self):
+        """Report an explicitly requested AOR with no matching archive products."""
         with self.assertLogs("SPCA.spitzer_download", level="WARNING"):
             found = self.discover(aorkeys=[1234501, 9999999])
         self.assertEqual(found.meta["requested_aors_without_matches"], ["9999999"])
@@ -710,11 +785,13 @@ class AorTimeCoverageTests(Fixture):
         )
 
     def test_date_filter_only_catches_start(self):
+        """Expand a date-selected AOR beyond its first matching exposure."""
         table, count = long_aor()
         first = time_filtered(table)(None, None, (T0, T0 + 0.125))
         self.assertLess(len(first), count)
 
     def test_aor_level_record_bounds_whole_aor(self):
+        """Use AOR-level bounds to recover the entire science sequence."""
         table, count = long_aor(aor_level=True)
         found = self.run_discovery(table)
         self.assertEqual(found["science_exposures"][0], count)
@@ -723,6 +800,9 @@ class AorTimeCoverageTests(Fixture):
         self.client.fetch_text.assert_not_called()
 
     def test_quality_report_bounds_whole_aor(self):
+        """Use quality-report start/end times to expand an incompletely discovered
+        AOR.
+        """
         table, count = long_aor()
         self.client.fetch_text.side_effect = None
         self.client.fetch_text.return_value = quality_report()
@@ -736,6 +816,9 @@ class AorTimeCoverageTests(Fixture):
         )
 
     def test_gap_search_recovers_whole_aor_and_warns(self):
+        """Recover long-AOR coverage through gap searches and disclose the inferred
+        bounds.
+        """
         table, count = long_aor()
         with self.assertLogs("SPCA.spitzer_download", level="WARNING") as logs:
             found = self.run_discovery(table)
@@ -746,6 +829,7 @@ class AorTimeCoverageTests(Fixture):
         self.assertGreater(last, T0 + 1.5 + spitzer_download.AOR_GAP - 0.01)
 
     def test_planning_from_truncated_hint_recovers_whole_aor(self):
+        """Expand incomplete discovery hints before constructing the per-file plan."""
         table, count = long_aor(aor_level=True)
         self.client.query_sia.side_effect = time_filtered(table)
         plan = plan_download(
@@ -759,6 +843,7 @@ class AorTimeCoverageTests(Fixture):
         self.assertEqual(plan.meta["excluded_products"], {"aor_level": 1})
 
     def test_unbounded_aor_is_reported_not_silently_complete(self):
+        """Fail when complete AOR time bounds cannot be established."""
         table, _ = long_aor(step=0.4, span=3 * MAX_AOR_SPAN)
         with self.assertLogs("SPCA.spitzer_download", level="WARNING") as logs:
             found = self.run_discovery(table)
@@ -767,6 +852,9 @@ class AorTimeCoverageTests(Fixture):
         self.assertLessEqual(found["mjd_max"][0] - found["mjd_min"][0], 12)
 
     def test_parse_quality_report(self):
+        """Extract AOR start/end times and processed channel counts from a quality
+        report.
+        """
         report = parse_quality_report(quality_report())
         self.assertAlmostEqual(report["start"], T0)
         self.assertAlmostEqual(report["end"], T0 + 1.5)
@@ -797,6 +885,9 @@ class PlanningTests(Fixture):
         )
 
     def test_per_file_plan_keeps_cal_and_reports_exclusions(self):
+        """Plan supported science/calibration files and report every excluded product
+        category.
+        """
         plan = self.sia_plan(profile="archive")
         self.assertEqual(
             list(plan["local_path"]),
@@ -826,6 +917,7 @@ class PlanningTests(Fixture):
         self.assertEqual(summary["completeness"][0], "unverified")
 
     def test_plan_requeries_aor_time_window(self):
+        """Query the complete AOR window when constructing the download plan."""
         self.plan()
         expansion = self.client.query_sia.call_args_list[0]
         low, high = expansion.kwargs["time"]
@@ -833,6 +925,9 @@ class PlanningTests(Fixture):
         self.assertAlmostEqual(high, 54768.041 + spitzer_download.AOR_PAD)
 
     def test_default_spca_profile_keeps_science_and_sky_dark_only(self):
+        """Exclude unrelated QA and archive products from the default science/sky-
+        dark plan.
+        """
         plan = self.sia_plan()
         self.assertEqual((plan.meta["profile"], plan.meta["science_product"]), DEFAULT)
         self.assertEqual(
@@ -842,6 +937,9 @@ class PlanningTests(Fixture):
         self.assertEqual(plan.meta["excluded_products"]["not_requested"], 2)
 
     def test_science_qa_adds_uncertainty_and_mask_and_keeps_sky_dark(self):
+        """Add same-exposure QA files while retaining science and sky-dark
+        associations.
+        """
         plan = self.sia_plan(profile="science-qa")
         self.assertEqual(
             dict(zip(plan["filename"], plan["product"])),
@@ -855,6 +953,7 @@ class PlanningTests(Fixture):
         self.assertNotIn("not_requested", plan.meta["excluded_products"])
 
     def test_missing_size_estimate_is_unknown(self):
+        """Represent unavailable archive byte estimates as unknown rather than zero."""
         table = sia_products(self.entries[:1])
         table["access_estsize"] = MaskedColumn(table["access_estsize"], mask=[True])
         self.client.query_sia.return_value = table
@@ -863,6 +962,7 @@ class PlanningTests(Fixture):
         self.assertEqual(summary["estimated_bytes"][0], 0)
 
     def test_shared_calibration_is_retained_for_each_science_aor(self):
+        """Retain a shared calibration product under every associated science AOR."""
         entries = [(2, "bcd", "a_bcd.fits"), (2, "cal", "a_sdark.fits")]
         table = vstack(
             [
@@ -893,6 +993,7 @@ class PlanningTests(Fixture):
         self.assertEqual(list(calibration["channel"]), [2, 2])
 
     def test_conflicting_same_aor_url_metadata_is_rejected(self):
+        """Reject contradictory metadata attached to one URL within a science AOR."""
         for field, value in (
             ("proposal_id", "WASP_C5_60003"),
             ("access_estsize", 999),
@@ -914,6 +1015,9 @@ class PlanningTests(Fixture):
                     self.plan()
 
     def test_repeated_calibration_associations_use_science_coverage(self):
+        """Merge repeated calibration associations using the science sequence's time
+        coverage.
+        """
         tables = []
         for aor in ("1234501", "1234502"):
             science = sia_products(
@@ -973,6 +1077,9 @@ class PlanningTests(Fixture):
         self.assertTrue(np.all(plan == reversed_plan))
 
     def test_different_calibration_urls_for_same_destination_are_errors(self):
+        """Reject distinct calibration URLs that would overwrite the same local
+        filename.
+        """
         first = sia_products(
             [(1, "bcd", "a_bcd.fits"), (1, "cal", "shared_sdark.fits")]
         )
@@ -987,6 +1094,9 @@ class PlanningTests(Fixture):
             self.plan(profile="archive")
 
     def test_date_filtered_long_aor_with_repeated_calibration(self):
+        """Preserve complete long-AOR science coverage despite repeated calibration
+        records.
+        """
         for authoritative in (False, True):
             with self.subTest(authoritative=authoritative):
                 science, count = long_aor(aor_level=authoritative)
@@ -1017,6 +1127,9 @@ class PlanningTests(Fixture):
                 self.assertEqual(sum(plan["product"] == "ancillary"), 1)
 
     def test_duplicate_same_aor_url_with_missing_metadata_is_deduplicated(self):
+        """Deduplicate repeated URLs when optional metadata is absent rather than
+        contradictory.
+        """
         table = sia_products([(1, "bcd", "a_bcd.fits")])
         table.remove_columns(["s_ra", "s_dec", "access_estsize"])
         self.client.query_sia.return_value = vstack([table, table])
@@ -1025,17 +1138,22 @@ class PlanningTests(Fixture):
         self.assertEqual(len(self.plan()), 1)
 
     def test_plan_without_expansion_hints_is_rejected(self):
+        """Refuse plans lacking enough metadata to establish complete AOR coverage."""
         observations = self.observations()
         observations.remove_columns(["ra", "dec", "mjd_min", "mjd_max"])
         with self.assertRaisesRegex(ArchiveError, "expansion hints"):
             plan_download(observations, self.root, client=self.client)
 
     def test_empty_inventory_is_not_complete(self):
+        """Keep an empty inventory from being mistaken for a complete science
+        download.
+        """
         self.client.query_sia.return_value = sia_products([])
         with self.assertRaisesRegex(ArchiveError, r"No \*_bcd.fits science images"):
             self.plan()
 
     def test_unavailable_requested_channels_are_reported(self):
+        """Report requested channels for which no science products are available."""
         self.client.fetch_text.side_effect = None
         self.client.fetch_text.return_value = quality_report()
         with self.assertLogs("SPCA.spitzer_download", level="INFO") as logs:
@@ -1049,6 +1167,9 @@ class PlanningTests(Fixture):
         self.assertFalse(any(record.levelname == "WARNING" for record in logs.records))
 
     def test_discovered_channel_losing_bcd_links_remains_error(self):
+        """Reject a channel whose discovered science records disappear during plan
+        expansion.
+        """
         observations = self.observations()
         observations["channel"] = [4]
         with self.assertRaisesRegex(
@@ -1057,12 +1178,16 @@ class PlanningTests(Fixture):
             plan_download(observations, self.root, client=self.client)
 
     def test_unknown_aor_rejected(self):
+        """Refuse records whose science AOR cannot be identified safely."""
         with self.assertRaisesRegex(ValueError, "not discovered"):
             plan_download(
                 self.observations(), self.root, aorkeys=[999], client=self.client
             )
 
     def test_conflicting_duplicate_paths_rejected(self):
+        """Reject plan entries that assign different products to the same
+        destination.
+        """
         first = sia_products([(1, "bcd", "a_bcd.fits")])
         second = first.copy()
         second["access_url"] = [first["access_url"][0].replace("049600", "049601")]
@@ -1072,6 +1197,7 @@ class PlanningTests(Fixture):
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP transfers")
     def test_saved_plan_downloads_files_compatible_with_directory_setup(self):
+        """Execute persisted plans into the layout recognized by directory setup."""
         cube = image_bytes((64, 4, 4))
         self.client.session.get.return_value = response(cube)
         plan = Table.read(
@@ -1098,6 +1224,7 @@ class DownloadTests(Fixture):
         return Table.read(self.root / "download_manifest.ecsv", format="ascii.ecsv")
 
     def test_byte_identical_fullframe_and_subarray(self):
+        """Preserve FITS bytes for both full-frame images and subarray cubes."""
         for shape in ((8, 8), (64, 4, 4)):
             with self.subTest(shape=shape):
                 data = image_bytes(shape)
@@ -1116,6 +1243,7 @@ class DownloadTests(Fixture):
                 path.unlink()
 
     def test_verified_files_skip_network_on_restart(self):
+        """Verify hashes and reuse completed files without downloading them again."""
         self.client.session.get.return_value = response(image_bytes())
         plan = self.plan()
         download_plan(plan, client=self.client)
@@ -1128,6 +1256,9 @@ class DownloadTests(Fixture):
         self.assertEqual(self.manifest()["status"][0], "skipped")
 
     def test_corrupted_completed_file_is_downloaded_again(self):
+        """Repair a previously recorded product whose local content no longer matches
+        its hash.
+        """
         self.client.session.get.return_value = response(image_bytes())
         plan = self.plan()
         download_plan(plan, client=self.client)
@@ -1142,6 +1273,9 @@ class DownloadTests(Fixture):
         self.assertEqual(self.manifest()["status"][0], "downloaded")
 
     def test_untracked_existing_file_is_not_overwritten_by_default(self):
+        """Preserve manual files absent from the download inventory and report a
+        conflict.
+        """
         self.client.query_sia.return_value = sia_products(
             [(1, "bcd", "a_bcd.fits"), (1, "bcd", "b_bcd.fits")]
         )
@@ -1163,6 +1297,9 @@ class DownloadTests(Fixture):
         self.assertNotIn(str(plan["local_path"][0]), list(inventory["local_path"]))
 
     def test_untracked_file_replaced_only_when_authorized(self):
+        """Replace manual destination files only under explicit overwrite
+        authorization.
+        """
         plan = self.plan()
         mine = self.root / str(plan["local_path"][0])
         mine.parent.mkdir(parents=True)
@@ -1174,6 +1311,9 @@ class DownloadTests(Fixture):
         self.assertEqual(self.manifest()["status"][0], "downloaded")
 
     def test_stream_refuses_destination_created_during_transfer(self):
+        """Refuse to overwrite a file that appears while its download is still
+        streaming.
+        """
         from SPCA.spitzer_download import _stream
 
         destination = self.root / "x_bcd.fits"
@@ -1189,6 +1329,9 @@ class DownloadTests(Fixture):
         self.assertFalse(list(self.root.glob("*.part")))
 
     def test_inventory_records_product_selection(self):
+        """Persist per-AOR/channel product selection alongside downloaded-file
+        provenance.
+        """
         self.client.session.get.return_value = response(image_bytes())
         inventory = download_plan(self.plan(), client=self.client)
         expected = {"1234501/ch1": {"profile": "spca", "science_product": "bcd"}}
@@ -1241,6 +1384,9 @@ class DownloadTests(Fixture):
         return plan, paths
 
     def test_journaled_downloads_recovered_after_lost_checkpoint(self):
+        """Recover hash-verified journal entries after interruption before an
+        inventory checkpoint.
+        """
         plan, paths = self.killed_before_checkpoint()
         inventory = download_plan(plan, client=self.client)
         # Only the never-downloaded file is fetched; no --overwrite-untracked.
@@ -1258,6 +1404,10 @@ class DownloadTests(Fixture):
             self.assertEqual(path.read_bytes(), image_bytes())
 
     def test_journal_recovery_after_successful_checkpoint(self):
+        """Reconcile residual journal records with an already committed inventory
+        checkpoint.
+        """
+
         class Killed(BaseException):
             pass
 
@@ -1305,6 +1455,7 @@ class DownloadTests(Fixture):
         )
 
     def test_journal_does_not_adopt_changed_or_manual_files(self):
+        """Reject journal recovery for modified files and unrecorded manual products."""
         plan, paths = self.killed_before_checkpoint()
         # Same filename and journal record but different content, plus a file
         # placed by hand that the downloader never wrote.
@@ -1324,6 +1475,9 @@ class DownloadTests(Fixture):
         self.assertEqual(list(inventory["local_path"]), [str(plan["local_path"][1])])
 
     def test_missing_uncertainty_and_mask_are_reported(self):
+        """Report absent same-exposure QA associations without claiming archive
+        completeness.
+        """
         self.client.session.get.return_value = response(image_bytes())
         inventory = download_plan(self.plan(), client=self.client)
         summary = inventory_summary(inventory)
@@ -1337,6 +1491,7 @@ class DownloadTests(Fixture):
         self.assertEqual(persisted["completeness"][0], "unverified")
 
     def test_failure_persists_completed_files_for_restart(self):
+        """Keep completed-file provenance when a later transfer fails."""
         import requests
 
         self.client.query_sia.return_value = sia_products(
@@ -1362,6 +1517,7 @@ class DownloadTests(Fixture):
         )
 
     def test_interruption_is_recorded(self):
+        """Persist interrupted transfer status so the next run can resume safely."""
         self.client.session.get.side_effect = KeyboardInterrupt
         with self.assertRaises(KeyboardInterrupt):
             download_plan(self.plan(), client=self.client)
@@ -1369,6 +1525,9 @@ class DownloadTests(Fixture):
         self.assertFalse(list(self.root.rglob("*.part")))
 
     def test_bookkeeping_is_batched_for_large_aors(self):
+        """Batch inventory checkpoints rather than rewriting all bookkeeping for
+        every file.
+        """
         files = 2000
         self.client.query_sia.return_value = sia_products(
             [(1, "bcd", f"f{i:05d}_bcd.fits") for i in range(files)]
@@ -1393,10 +1552,12 @@ class DownloadTests(Fixture):
         self.assertEqual(set(self.manifest()["status"]), {"downloaded"})
 
     def test_invalid_checkpoint_settings_rejected(self):
+        """Reject invalid checkpoint intervals before beginning transfer work."""
         with self.assertRaises(ValueError):
             download_plan(self.plan(), client=self.client, checkpoint_files=0)
 
     def test_unsafe_symlink_destination_rejected(self):
+        """Reject destination symlinks that could escape the intended download tree."""
         path = self.root / "data/ch1"
         path.parent.mkdir(parents=True)
         outside = self.root / "outside"
@@ -1406,6 +1567,7 @@ class DownloadTests(Fixture):
             download_plan(self.plan(), client=self.client)
 
     def test_invalid_fits_header_raises_archive_error(self):
+        """Report malformed FITS headers as archive validation errors."""
         data = bytearray(image_bytes())
         # A nonstandard BITPIX is a FITS verification error, not an HTTP error.
         index = data.find(b"BITPIX  ")
@@ -1415,6 +1577,7 @@ class DownloadTests(Fixture):
             download_plan(self.plan(), client=self.client)
 
     def test_content_length_mismatch_persists_failed_status(self):
+        """Reject short HTTP bodies and persist the failed transfer state."""
         data = image_bytes()
         result = response(data)
         result.headers["Content-Length"] = str(len(data) + 10)
@@ -1428,6 +1591,7 @@ class DownloadTests(Fixture):
         self.assertFalse((self.root / str(plan["local_path"][0])).exists())
 
     def test_truncated_unknown_length_transfer_not_promoted(self):
+        """Reject truncated FITS transfers even when HTTP supplies no content length."""
         data = image_bytes()
         result = response(data, length=False)
         result.iter_content.return_value = [data[:100]]
@@ -1439,6 +1603,9 @@ class DownloadTests(Fixture):
         self.assertFalse((self.root / str(plan["local_path"][0])).exists())
 
     def test_invalid_fits_not_promoted_even_with_matching_length(self):
+        """Validate FITS structure before promoting a body with the expected byte
+        count.
+        """
         data = b"x" * len(image_bytes())
         self.client.session.get.return_value = response(data)
         plan = self.plan()
@@ -1447,6 +1614,7 @@ class DownloadTests(Fixture):
         self.assertFalse((self.root / str(plan["local_path"][0])).exists())
 
     def test_interrupted_stream_retries(self):
+        """Retry a transiently interrupted stream before declaring transfer failure."""
         import requests
 
         first = response(image_bytes())
@@ -1458,6 +1626,9 @@ class DownloadTests(Fixture):
         self.assertEqual(len(inventory), 1)
 
     def test_http404_persists_failure_without_retry(self):
+        """Record a permanent missing-file response without retrying it as a
+        transient error.
+        """
         self.client.session.get.return_value = response(b"missing", status=404)
         self.client.retries = 3
         with self.assertRaisesRegex(ArchiveError, "HTTP download failed"):
@@ -1466,6 +1637,7 @@ class DownloadTests(Fixture):
         self.assertEqual(self.manifest()["status"][0], "failed")
 
     def test_timeout_persists_failure(self):
+        """Persist timeout failures in the download manifest."""
         import requests
 
         self.client.session.get.side_effect = requests.Timeout("read timed out")
@@ -1474,6 +1646,7 @@ class DownloadTests(Fixture):
         self.assertEqual(self.manifest()["status"][0], "failed")
 
     def test_manifest_path_escape_is_rejected(self):
+        """Reject persisted paths that escape the selected campaign root."""
         plan = self.plan()
         plan["local_path"] = ["../escape_bcd.fits"]
         with self.assertRaisesRegex(ArchiveError, "Unsafe output path"):
@@ -1501,6 +1674,9 @@ class CompareInventoryTests(Fixture):
         return path
 
     def test_archive_index_reports_missing_extra_excluded_and_unplanned(self):
+        """Distinguish missing, extra, excluded and unplanned-channel files in
+        independent comparisons.
+        """
         plan = self.plan(profile="archive")
         index = "".join(
             f'<li><a href="{name}"> {name}</a></li>'
@@ -1548,6 +1724,7 @@ class CompareInventoryTests(Fixture):
         )
 
     def test_quality_count_disagreement_is_mismatch(self):
+        """Report archive quality-count disagreement as a completeness mismatch."""
         plan = self.plan()
         self.client.fetch_text.side_effect = lambda url, max_bytes=None: (
             '<a href="a_bcd.fits">' if url.endswith("/") else quality_report()
@@ -1558,6 +1735,9 @@ class CompareInventoryTests(Fixture):
         self.assertEqual(result["agreement"][0], "mismatch")
 
     def test_empty_archive_index_is_error(self):
+        """Reject empty or unparseable archive listings instead of reporting
+        agreement.
+        """
         plan = self.plan()
         self.client.fetch_text.side_effect = None
         self.client.fetch_text.return_value = '<a href="../">Parent</a>'
@@ -1565,6 +1745,9 @@ class CompareInventoryTests(Fixture):
             compare_inventory(plan, client=self.client)
 
     def test_sha_zip_reference_matches(self):
+        """Compare plans against independent SHA ZIP contents by AOR/channel
+        filename.
+        """
         plan = self.plan(profile="archive")
         prefix = "r1234501/ch1"
         reference = self.zip_reference(
@@ -1583,6 +1766,7 @@ class CompareInventoryTests(Fixture):
         self.client.fetch_text.assert_not_called()
 
     def test_spca_plan_reports_not_requested_and_extra(self):
+        """Separate deliberately unrequested products from unexpected science files."""
         plan = self.plan()
         reference = self.root / "extracted"
         (reference / "r1234501/ch1/bcd").mkdir(parents=True)
@@ -1595,6 +1779,7 @@ class CompareInventoryTests(Fixture):
         self.assertEqual(result["agreement"][0], "mismatch")
 
     def test_reference_without_bcd_entries_is_error(self):
+        """Refuse reference listings lacking recognizable BCD-directory products."""
         with self.assertRaisesRegex(ArchiveError, "no r<AOR>/chN/bcd"):
             compare_inventory(self.plan(), self.zip_reference(["README.txt"]))
 
@@ -1605,6 +1790,9 @@ class CompareInventoryTests(Fixture):
         )
 
     def test_downloaded_spca_inventory_does_not_report_missing_qa_files(self):
+        """Use persisted selection when comparing inventories so optional QA is not
+        counted as missing.
+        """
         self.client.session.get.return_value = response(image_bytes())
         download_plan(self.plan(), client=self.client)
         # Read back from disk, as a user comparing a finished download would.
@@ -1620,6 +1808,7 @@ class CompareInventoryTests(Fixture):
         self.assertEqual(result["agreement"][0], "match_without_qa_count")
 
     def test_unrecorded_product_selection_is_error(self):
+        """Refuse inventory comparison when science processing selection is unknown."""
         self.client.session.get.return_value = response(image_bytes())
         inventory = download_plan(self.plan(), client=self.client)
         inventory.meta.clear()
@@ -1630,6 +1819,7 @@ class CompareInventoryTests(Fixture):
 @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP adapter tests")
 class AdapterTests(Fixture):
     def test_fetch_text_streams_with_timeout(self):
+        """Stream metadata requests using the configured timeout."""
         with patch("SPCA.spitzer_download._session") as session_factory:
             session_factory.return_value.get.return_value = response(b"report text")
             client = ArchiveClient(timeout=12, retries=1)
@@ -1639,6 +1829,9 @@ class AdapterTests(Fixture):
         self.assertTrue(kwargs["stream"])
 
     def test_fetch_text_http_error_and_size_limit(self):
+        """Reject failed or oversized metadata responses before parsing their
+        content.
+        """
         with patch("SPCA.spitzer_download._session") as session_factory:
             get = session_factory.return_value.get
             get.return_value = response(b"missing", status=404)
@@ -1651,6 +1844,9 @@ class AdapterTests(Fixture):
 
     @unittest.skipUnless(HAS_ASTROQUERY, "Install .[download] for astroquery adapter")
     def test_sia_uses_collection_not_calibration_level(self):
+        """Constrain SIA to the Spitzer collection using the supported service
+        parameter.
+        """
         from astroquery.ipac.irsa import IrsaClass
 
         table = sia_products([(1, "bcd", "a_bcd.fits")])
@@ -1664,6 +1860,7 @@ class AdapterTests(Fixture):
 
     @unittest.skipUnless(HAS_ASTROQUERY, "Install .[download] for astroquery adapter")
     def test_sia_overflow_warning_is_error(self):
+        """Treat a service overflow warning as incomplete discovery."""
         import warnings
 
         from astroquery.ipac.irsa import IrsaClass
@@ -1681,6 +1878,7 @@ class AdapterTests(Fixture):
 
     @unittest.skipUnless(HAS_ASTROQUERY, "Install .[download] for astroquery adapter")
     def test_sia_row_limit_is_not_accepted_as_complete(self):
+        """Reject row-limited SIA results that could omit science exposures."""
         from astroquery.ipac.irsa import IrsaClass
 
         table = Mock()
@@ -1707,6 +1905,7 @@ class InterfaceTests(Fixture):
         ]
 
     def test_cli_default_is_discovery_only(self):
+        """Default the command-line driver to metadata discovery without downloads."""
         with (
             patch("SPCA.spitzer_download.ArchiveClient", return_value=self.client),
             patch("SPCA.spitzer_download.download_plan") as download,
@@ -1719,6 +1918,7 @@ class InterfaceTests(Fixture):
         self.assertTrue((self.root / "discovered_observations.ecsv").exists())
 
     def test_cli_preview_never_downloads(self):
+        """Construct and summarize preview plans without transferring science files."""
         with (
             patch("SPCA.spitzer_download.ArchiveClient", return_value=self.client),
             patch("SPCA.spitzer_download.download_plan") as download,
@@ -1734,6 +1934,9 @@ class InterfaceTests(Fixture):
         self.assertEqual(sorted(set(saved["product"])), ["science"])
 
     def test_cli_compare_with_reference_writes_report(self):
+        """Write independent-reference comparison results from the command-line
+        workflow.
+        """
         reference = self.root / "sha.zip"
         with ZipFile(reference, "w") as archive:
             archive.writestr("r1234501/ch1/bcd/first_bcd.fits", b"")
@@ -1750,17 +1953,22 @@ class InterfaceTests(Fixture):
         self.assertEqual(report["agreement"][0], "match_without_qa_count")
 
     def test_cli_query_error_is_nonzero(self):
+        """Return a nonzero CLI status when archive discovery fails."""
         self.client.query_sia.side_effect = ArchiveError("unavailable")
         with patch("SPCA.spitzer_download.ArchiveClient", return_value=self.client):
             self.assertEqual(main(self.cli()), 1)
 
     def test_cli_rejects_removed_service_option(self):
+        """Reject the obsolete service selector instead of silently accepting
+        unsupported behavior.
+        """
         with self.assertRaises(SystemExit) as caught:
             main(self.cli("--service", "dataservice"))
         self.assertEqual(caught.exception.code, 2)
 
     @unittest.skipUnless(HAS_REQUESTS, "Install .[download] for HTTP transfers")
     def test_explicit_cli_download_runs_directory_setup(self):
+        """Run directory setup after an explicitly requested successful CLI download."""
         self.client.session.get.return_value = response(image_bytes())
         with patch("SPCA.spitzer_download.ArchiveClient", return_value=self.client):
             status = main(self.cli("--channels", "1", "--download"))
@@ -1768,6 +1976,9 @@ class InterfaceTests(Fixture):
         self.assertTrue((self.root / "analysis/aorSnippet.txt").is_file())
 
     def test_manifest_cannot_silently_ignore_channel_selection(self):
+        """Reject channel overrides that conflict with a persisted manifest
+        selection.
+        """
         path = save_plan(self.plan())
         for selector in (
             ["--channels", "4"],
@@ -1780,6 +1991,7 @@ class InterfaceTests(Fixture):
                 self.assertEqual(caught.exception.code, 2)
 
     def test_invalid_manifest_is_actionable_nonzero_error(self):
+        """Report malformed persisted plans with an actionable nonzero CLI failure."""
         path = self.root / "invalid.ecsv"
         Table({"unrelated": [1]}).write(path, format="ascii.ecsv")
         self.assertEqual(main(["--manifest", str(path)]), 1)
@@ -1797,6 +2009,7 @@ class InterfaceTests(Fixture):
                 namespace.update(after_settings)
 
     def test_notebook_runs_with_mocks_and_download_disabled(self):
+        """Execute the discovery notebook offline with science transfer disabled."""
         namespace = {"display": lambda value: None}
         with (
             patch(
@@ -1815,6 +2028,9 @@ class InterfaceTests(Fixture):
         self.assertIsNotNone(namespace["POSITION"])
 
     def test_notebook_selected_aor_previews_and_compares_shared_plan(self):
+        """Use one selected-AOR plan for notebook preview and independent
+        completeness comparison.
+        """
         namespace = {"display": lambda value: None}
         self.client.query_sia.return_value = sia_products(
             [

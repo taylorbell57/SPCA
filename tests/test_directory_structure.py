@@ -30,6 +30,7 @@ class TestDirectoryStructure(unittest.TestCase):
             self.assertTrue(directory.is_dir(), directory)
 
     def test_mixed_channels_are_routed_by_each_member(self):
+        """Route every ZIP member to its own channel while preserving archive bytes."""
         archive = self.make_archive(
             [
                 ("download_readme.txt", b"Download metadata"),
@@ -64,6 +65,9 @@ class TestDirectoryStructure(unittest.TestCase):
         self.assertEqual((self.root / "raw/download.zip").read_bytes(), original_zip)
 
     def test_single_channel_archive_retains_the_pipeline_layout(self):
+        """Preserve the AOR/chN layout for single-channel archives in all four
+        channels.
+        """
         for number in range(1, 5):
             channel = f"ch{number}"
             with self.subTest(channel=channel):
@@ -87,6 +91,7 @@ class TestDirectoryStructure(unittest.TestCase):
                 self.assert_analysis_directories(channel)
 
     def test_multiple_archives_merge_into_existing_channel_directories(self):
+        """Merge independent archives without disturbing existing observations."""
         existing = self.root / "data/ch1/r1234501/ch1/bcd/existing_bcd.fits"
         existing.parent.mkdir(parents=True)
         existing.write_bytes(b"Existing observation")
@@ -120,11 +125,13 @@ class TestDirectoryStructure(unittest.TestCase):
         self.assertTrue(ignored.is_file())
 
     def test_no_archives_does_not_create_output_directories(self):
+        """Fail without creating analysis directories when no archive or BCD exists."""
         with self.assertRaisesRegex(ValueError, "No ZIP archives"):
             make_directory_structure(self.root)
         self.assertEqual(list(self.root.iterdir()), [])
 
     def test_already_extracted_bcds_are_reused_idempotently(self):
+        """Reuse programmatic BCD downloads across repeated directory setup calls."""
         for channel in ("ch1", "ch3", "ch4"):
             path = (
                 self.root
@@ -143,6 +150,7 @@ class TestDirectoryStructure(unittest.TestCase):
         self.assertFalse(list(self.root.glob("*.zip")))
 
     def test_existing_and_zip_aors_both_contribute_to_snippet(self):
+        """Derive the AOR selector from both existing data and newly extracted AORs."""
         path = self.root / "data/ch1/r1299901/ch1/bcd/existing_bcd.fits"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"Existing")
@@ -152,12 +160,14 @@ class TestDirectoryStructure(unittest.TestCase):
         self.assert_analysis_directories("ch2")
 
     def test_archive_without_channel_paths_is_left_in_place(self):
+        """Reject unrecognized archive layouts without moving the original ZIP."""
         archive = self.make_archive([("readme.txt", b"No observations")])
         with self.assertRaisesRegex(ValueError, "No AOR/chN directories"):
             make_directory_structure(self.root)
         self.assertEqual(list(self.root.iterdir()), [archive])
 
     def test_existing_raw_archive_is_not_overwritten(self):
+        """Refuse to replace an archived ZIP with a second download of the same name."""
         archive = self.make_archive([("r1234501/ch1/bcd/image.fits", b"New data")])
         (self.root / "raw").mkdir()
         archived = self.root / "raw" / archive.name
@@ -171,6 +181,7 @@ class TestDirectoryStructure(unittest.TestCase):
         self.assertFalse((self.root / "data").exists())
 
     def test_invalid_member_paths_are_rejected_before_extraction(self):
+        """Reject absolute or escaping ZIP paths before writing any members."""
         for filename in ("../ch1/image.fits", "/r123/ch1/image.fits"):
             with self.subTest(filename=filename):
                 archive = self.make_archive(
@@ -185,6 +196,7 @@ class TestDirectoryStructure(unittest.TestCase):
                 self.assertFalse((self.root / "data").exists())
 
     def test_bad_zip_does_not_move_other_archives(self):
+        """Validate all archives before moving any original download."""
         archive = self.make_archive([("r1234501/ch1/bcd/image.fits", b"Observation")])
         (self.root / "second.zip").write_bytes(b"Invalid ZIP")
         with self.assertRaises(BadZipFile):

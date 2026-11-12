@@ -30,6 +30,8 @@ from scipy import interpolate
 from scipy import optimize as opt
 from scipy import stats as st
 
+from .irac_timing import exposure_midpoints, timing_header
+from .Photometry_Common import bin_array, bin_timestamps, create_folder
 from .spitzer_products import validate_science_product
 
 
@@ -80,7 +82,7 @@ def get_fnames(directory, AOR_snip, ch, science_product="bcd"):
     return fnames, len(fnames)
 
 
-def get_time(hdu_list, time):
+def get_time(hdu_list, time, time_scale="tdb", target_coord=None, time_format="bmjd"):
     """
     Gets the time stamp for each image.
 
@@ -97,17 +99,20 @@ def get_time(hdu_list, time):
     -------
 
     time     : 1D array
-        Time array with new values appended.
+        Absolute BMJD_TDB values appended by default, never instrument uptime.
+        Optional BJD format and explicit UTC scale follow the shared API.
     """
-    h, w, l = hdu_list[0].data.shape
-    t = np.linspace(
-        hdu_list[0].header["AINTBEG"] + hdu_list[0].header["EXPTIME"] / 2,
-        hdu_list[0].header["ATIMEEND"] - hdu_list[0].header["EXPTIME"] / 2,
-        h,
+    # AINTBEG is an internal instrument clock with a documented start-time
+    # defect, not an absolute astronomical timestamp. Use the shared BCD
+    # convention, including the same subarray cadence fix as aperture/PSF/PLD.
+    time.extend(
+        exposure_midpoints(
+            hdu_list[0].header,
+            time_scale=time_scale,
+            target_coord=target_coord,
+            time_format=time_format,
+        )
     )
-    sec2day = 1.0 / (3600.0 * 24.0)
-    t = sec2day * t
-    time.extend(t)
     return time
 
 
@@ -614,30 +619,8 @@ def A_photometry(
 
 
 def binning_data(data, size):
-    """
-    Median bin an array.
-
-    Parameters
-    ----------
-    data     : 1D array
-        Array of data to be binned.
-
-    size     : int
-        Size of bins.
-
-    Returns
-    -------
-    binned_data: 1D array
-        Array of binned data.
-
-    binned_data: 1D array
-        Array of standard deviation for each entry in binned_data.
-    """
-    data = np.ma.masked_invalid(data)
-    reshaped_data = data.reshape((len(data) / size, size))
-    binned_data = np.ma.median(reshaped_data, axis=1)
-    binned_data_std = np.std(reshaped_data, axis=1)
-    return binned_data, binned_data_std
+    """Return median and population scatter, retaining a partial final bin."""
+    return bin_array(data, size)
 
 
 def get_lightcurve(
@@ -656,10 +639,21 @@ def get_lightcurve(
     oversamp=False,
     savecomp=True,
     science_product="bcd",
+    time_scale="tdb",
+    target_coord=None,
+    time_format="bmjd",
     **kwargs,
 ):
     """
     Given a directory, looks for data (bcd.fits files), opens them and performs photometry.
+
+    This specialized legacy two-source routine implements subarray extraction
+    only; subarray=False raises NotImplementedError. Target coordinates affect
+    timing, not a full-frame crop. Its fixed source initialization/bounds need
+    review for each field; accepting a ch3/ch4 path does not establish detector-
+    specific validation. Recent timing/product-selection tests do not validate
+    the complete companion-subtraction science workflow. BCD/CBCD selection is
+    explicit. The separate legacy oversampler is unvalidated.
 
     Parameters
     ----------
@@ -678,8 +672,7 @@ def get_lightcurve(
         Channel used for the observation eg. 'ch1' for channel 1
 
     subarray : bool
-        True if observation were taken in subarray mode. False if
-        observation were taken in full-array mode.
+        Must be True; full-array extraction is not implemented.
 
     save     : bool (optional)
         True if you want to save the outputs. Default is True.
@@ -707,7 +700,7 @@ def get_lightcurve(
         saved as. Default is True.
 
     oversamp : bool (optional)
-        True if you want to oversample you image. Default is True.
+        Whether to use the unvalidated legacy interpolator. Default is False.
 
     savecomp : boold (optional)
         True is you want to save companion subtracted image. Default is True.
@@ -720,6 +713,13 @@ def get_lightcurve(
     Error      :
         If Photometry method is not supported/recognized by this pipeline.
     """
+    if save:
+        create_folder(
+            savepath,
+            auto=True,
+            overwrite=True,
+            products=(save_full.lstrip("/"), save_bin.lstrip("/"), "popt.dat"),
+        )
 
     print(kwargs)
     # Ignore warning and starts timing
@@ -756,7 +756,13 @@ def get_lightcurve(
             image_data0 = hdu_list[0].data
             h, w, l = image_data0.shape
             # get time
-            time = get_time(hdu_list, time)
+            time = get_time(
+                hdu_list,
+                time,
+                time_scale=time_scale,
+                target_coord=target_coord,
+                time_format=time_format,
+            )
             # convert MJy/str to electron count
             convfact = (
                 hdu_list[0].header["GAIN"]
@@ -769,7 +775,7 @@ def get_lightcurve(
             image_data2, tossed, badframetable = sigma_clipping(
                 image_data1,
                 i,
-                fname[fname.find("ch2/bcd/") + 8 :],
+                os.path.basename(fname),
                 tossed,
                 badframetable,
                 **kwargs,
@@ -822,11 +828,22 @@ def get_lightcurve(
         print(np.shape(bg_err))
 
     elif subarray == False:
-        print("Sorry this part is undercontruction!")
+        raise NotImplementedError("Companion extraction supports subarrays only")
+
+    # Absolute times can span AORs; carry every measurement through one sort.
+    order = np.argsort(time, kind="stable")
+    time = np.asarray(time)[order]
+    if np.any(np.diff(time) <= 0):
+        raise ValueError("Overlapping companion exposure times")
+    aperture_sum, aperture_sum_err, xo, yo, xw, yw, bg_flux, bg_err = [
+        np.asarray(values)[order]
+        for values in (aperture_sum, aperture_sum_err, xo, yo, xw, yw, bg_flux, bg_err)
+    ]
+    popt, pcov = popt[order], pcov[order]
 
     if bin_data == True:
         binned_flux, binned_flux_std = binning_data(np.asarray(aperture_sum), bin_size)
-        binned_time, binned_time_std = binning_data(np.asarray(time), bin_size)
+        binned_time, binned_time_std = bin_timestamps(time, aperture_sum, bin_size)
         binned_xo, binned_xo_std = binning_data(np.asarray(xo), bin_size)
         binned_yo, binned_yo_std = binning_data(np.asarray(yo), bin_size)
         binned_xw, binned_xw_std = binning_data(np.asarray(xw), bin_size)
@@ -844,7 +861,7 @@ def get_lightcurve(
         axes[1].set_ylabel("$x_0$")
 
         axes[2].plot(binned_time, binned_yo, "r+")
-        axes[2].set_xlabel("Time since IRAC turn-on (days)")
+        axes[2].set_xlabel(f"Time ({time_format.upper()}_{time_scale.upper()})")
         axes[2].set_ylabel("$y_0$")
         fig.subplots_adjust(wspace=0)
         if save == True:
@@ -855,7 +872,11 @@ def get_lightcurve(
 
     if save == True:
         POPT_data = popt.T
-        POPT_head = "Flux, Time, x-centroid, y-centroid, x-PSF width, y-PSF width, Flux2, Time2, x-centroid2, y-centroid2, x-PSF width2, y-PSF width2"
+        POPT_head = (
+            "Rows: amplitude, x, y, sigma_x, sigma_y, "
+            "companion amplitude, x, y, sigma_x, sigma_y; "
+            "columns follow full light-curve rows; no time row"
+        )
         FULL_data = np.c_[
             aperture_sum, aperture_sum_err, time, xo, yo, xw, yw, bg_flux, bg_err
         ]
@@ -883,8 +904,36 @@ def get_lightcurve(
         pathFULL = savepath + save_full
         pathBINN = savepath + save_bin
         np.savetxt(pathPOPT, POPT_data, header=POPT_head)
-        np.savetxt(pathFULL, FULL_data, header=FULL_head)
-        np.savetxt(pathBINN, BINN_data, header=BINN_head)
+        np.savetxt(
+            pathFULL,
+            FULL_data,
+            header=FULL_head
+            + "\n"
+            + timing_header(
+                time_scale,
+                target_coord,
+                time_format,
+                bin_size=bin_size,
+                product_kind="companion",
+                time_column=2,
+                binning="median of timestamps of surviving flux samples",
+            ),
+        )
+        np.savetxt(
+            pathBINN,
+            BINN_data,
+            header=BINN_head
+            + "\n"
+            + timing_header(
+                time_scale,
+                target_coord,
+                time_format,
+                bin_size=bin_size,
+                product_kind="companion",
+                time_column=2,
+                binning="median of timestamps of surviving flux samples",
+            ),
+        )
 
     toc = tim.perf_counter()
     print("Number of discarded frames:", tossed)

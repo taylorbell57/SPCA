@@ -80,7 +80,7 @@ def plot_photometry(
     axes[4].plot(time0, psfyw0, "r.", markersize=1, alpha=0.7)
     axes[4].plot(time, psfyw, "k.", markersize=2, alpha=1.0)
     axes[4].set_ylabel("y PSF-width $\sigma _y$")
-    axes[4].set_xlabel("Time (BMJD)")
+    axes[4].set_xlabel("Time (BMJD_TDB)")
 
     for i in range(5):
         axes[i].axvline(x=peritime, color="C1", alpha=0.8, linestyle="dashed")
@@ -131,7 +131,7 @@ def plot_init_guess(time, data, astro, detec_full, savepath):
 
     axes[0].set_ylabel("Relative Flux")
     axes[2].set_ylabel("Relative Flux")
-    axes[2].set_xlabel("Time (BMJD)")
+    axes[2].set_xlabel("Time (BMJD_TDB)")
 
     axes[0].legend(loc=3)
     axes[1].legend(loc=3)
@@ -166,7 +166,7 @@ def plot_psf_dependence(
     axes[3].plot(time, psfyw, ".")
     axes[3].set_xlim(np.min(time), np.max(time))
     axes[3].set_ylabel("Y-PSF Width")
-    axes[3].set_xlabel("Time (BMJD)")
+    axes[3].set_xlabel("Time (BMJD_TDB)")
 
     for i in range(4):
         axes[i].axvline(x=peritime, color="red", alpha=0.8, linestyle="dashed")

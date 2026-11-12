@@ -11,6 +11,9 @@ from astropy import constants as const
 from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 
+from .irac import WAVELENGTH_UM, aor_tag, resolve_photometry_dir, validate_channel
+from .irac_timing import convert_time, load_aor_breaks
+
 warnings.filterwarnings("ignore")
 
 import pickle
@@ -67,7 +70,7 @@ def downloadExoplanetArchive():
 
 
 # FIX: Add a docstring for this function
-def loadArchivalData(rootpath, planet, channel):
+def loadArchivalData(rootpath, planet, channel, t0_scale=None):
     """Loads system parameters and respective uncertainties from the NASA Exoplanets Archives into p0_obj.
     Args:
         rootpath (str): Path to data
@@ -186,7 +189,18 @@ def loadArchivalData(rootpath, planet, channel):
     p0_obj["per_err"] = np.mean(
         [data["pl_orbpererr1"][nameIndex], np.abs(data["pl_orbpererr2"][nameIndex])]
     )
-    p0_obj["t0"] = data["pl_tranmid"][nameIndex] - 2.4e6 - 0.5
+    # Archive epochs may be heterogeneous; absence of a scale is not TDB.
+    declared_scale = (
+        data["pl_tsystemref"][nameIndex] if "pl_tsystemref" in data else None
+    )
+    if t0_scale != "tdb" and str(declared_scale).upper() != "BJD_TDB":
+        raise ValueError(
+            "Verify the transit epoch scale; pass t0_scale='tdb' only for "
+            "a documented BJD_TDB archive epoch"
+        )
+    p0_obj["t0"] = float(
+        convert_time(data["pl_tranmid"][nameIndex], source_format="bjd")
+    )
     p0_obj["t0_err"] = np.mean(
         [data["pl_tranmiderr1"][nameIndex], np.abs(data["pl_tranmiderr2"][nameIndex])]
     )
@@ -281,6 +295,8 @@ def loadCustomData(
     e_err=np.inf,
     argp_err=np.inf,
     Tstar_err=np.inf,
+    t0_format="bmjd",
+    t0_scale="tdb",
 ):
     """Load custom parameters into p0_obj.
     Args:
@@ -290,7 +306,7 @@ def loadCustomData(
         rp     (float): radius of the planets in unit of stellar radius
         a      (float): semi-major axis of the orbit of the planet in unit of stellar radius
         per    (float): period of the orbit in days
-        t0     (float): time of transit in BMJD
+        t0     (float): time of transit in BMJD_TDB (or explicit t0_format="bjd")
         inc    (float): inclination of the orbit in degrees (inc = 90 for edge-on orbit)
         e      (float): eccentricity of the orbit
         argp   (float): argument of periastron in degrees
@@ -300,7 +316,7 @@ def loadCustomData(
         rp_err   (float,optional): uncertainty on radius of the planets in unit of stellar radius
         a_err    (float,optional): uncertainty on semi-major axis of the orbit of the planet in unit of stellar radius
         per_err  (float,optional): uncertainty on period of the orbit in days
-        t0_err   (float,optional): uncertainty on time of transit in BMJD
+        t0_err   (float,optional): uncertainty on transit epoch in days
         inc_err  (float,optional): uncertainty on inclination of the orbit in degrees (inc = 90 for edge-on orbit)
         e_err    (float,optional): uncertainty on eccentricity of the orbit
         argp_err (float,optional): uncertainty on argument of periastron in degrees
@@ -321,7 +337,11 @@ def loadCustomData(
     p0_obj["a_err"] = np.abs(a_err)
     p0_obj["per"] = per
     p0_obj["per_err"] = np.abs(per_err)
-    p0_obj["t0"] = t0 - 2.4e6 - 0.5
+    if t0_scale != "tdb":
+        raise ValueError(
+            "Custom transit epoch must be TDB; convert at its original observer first"
+        )
+    p0_obj["t0"] = float(convert_time(t0, source_format=t0_format))
     p0_obj["t0_err"] = np.abs(t0_err)
     p0_obj["inc"] = inc
     p0_obj["inc_err"] = np.abs(inc_err)
@@ -348,18 +368,63 @@ def loadCustomData(
     return p0_obj
 
 
-# FIX: Add a docstring for this function (docstring not done)
+PHOENIX_BRIGHTNESS_WINDOWS_UM = {"ch1": (3.0, 4.0), "ch2": (4.0, 5.0)}
+# Historical broad windows for the approximate brightness calculation below;
+# these are not IRAC response-function limits or calibrated band integrals.
+
+
+def _phoenix_window(wavelength_um, flux, channel):
+    """Require a finite spectrum spanning the complete approximation window.
+
+    Wavelengths are vacuum micrometres from the HiRes FITS wavelength file.
+    Reject truncated files and invalid samples instead of summing an incomplete
+    window. The selected Göttingen PHOENIX-ACES library ends near 5.5 micrometres:
+    https://phoenix.astro.physik.uni-goettingen.de/
+    """
+    low, high = PHOENIX_BRIGHTNESS_WINDOWS_UM[channel]
+    wavelength_um, flux = np.asarray(wavelength_um), np.asarray(flux)
+    if (
+        wavelength_um.ndim != 1
+        or wavelength_um.shape != flux.shape
+        or len(wavelength_um) < 2
+        or not np.isfinite(wavelength_um).all()
+        or np.any(np.diff(wavelength_um) <= 0)
+        or wavelength_um[0] > low
+        or wavelength_um[-1] < high
+    ):
+        raise ValueError(f"PHOENIX wavelength coverage must span {low}-{high} um")
+    selected = (wavelength_um > low) & (wavelength_um < high)
+    if selected.sum() < 2 or not np.isfinite(flux[selected]).all():
+        raise ValueError("Insufficient finite PHOENIX samples in brightness window")
+    return selected
+
+
 def getTstarBright(rootpath, planet, channel, p0_obj):
-    """Calculate the stellar brightness temperature based on phoenix spectrum.
+    """Approximate ch1/ch2 stellar brightness temperature from PHOENIX spectra.
+
+    The existing calculation compares sample sums with Planck spectra over
+    broad windows, without IRAC response weighting or wavelength quadrature.
+    Loaded files must span those windows. The selected PHOENIX-ACES HiRes files
+    end near 5.5 um, so ch3/ch4 need spectra covering their complete response
+    functions and an appropriate bandpass integration.
+
     Args:
         rootpath (str): Path to data
         planet   (str): name of the planet
         channel  (str): Spitzer channel used to obtain the observation (ch1 or ch2)
         p0_obj (obj): object with initial parameters
     Returns:
-        tstar_b (): ???
-        p0_obj['Tstar_err'] (float): uncertainty on stellar temperature
+        tuple: Approximate brightness temperature and adopted stellar-temperature
+            uncertainty, both in kelvin.
     """
+
+    validate_channel(channel)
+    if channel in ("ch3", "ch4"):
+        raise NotImplementedError(
+            "The selected PHOENIX-ACES HiRes files end near 5.5 um; "
+            "ch3/ch4 require stellar spectra covering their full bandpasses "
+            "and response integration."
+        )
 
     # Get the phoenix file ready to compute the stellar brightness temperature
     teffStr = p0_obj["Tstar"]
@@ -432,9 +497,10 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
         print("Done download.", flush=True)
 
     with fits.open(phoenixSpectraFile) as f:
-        fStar = f[0].data * 1e-1  # 'erg/s/cm^2/cm' to kg/s^3
+        fStar = f[0].data * 1e-1  # erg/(s cm^2 cm) to W/m^3 (surface F_lambda)
     with fits.open(phoenixWavFile) as f:
         wavStar = f[0].data * 1e-4  # angstrom to micron
+    selected = _phoenix_window(wavStar, fStar, channel)
 
     def planck(wav, T):
         intensity = (2.0 * const.h.value * const.c.value**2) / (
@@ -450,13 +516,10 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
         # factor of pi likely needed to account for emitting area (pi*rstar^2 where rstar=1)
         return (np.sum(planck(wavs, temp) * np.pi) - fStarSummed) ** 2
 
+    # Historical temperature search: 3000-11000 K inclusive, in 10 K steps.
     temps = np.linspace(3000, 11000, 801, endpoint=True)
-    if channel == "ch1":
-        incides = np.where(np.logical_and(wavStar < 4.0, wavStar > 3.0))[0]
-    else:
-        incides = np.where(np.logical_and(wavStar < 5.0, wavStar > 4.0))[0]
     diffs = [
-        fluxDiff(temp, np.sum(fStar[incides]), wavStar[incides] * 1e-6)
+        fluxDiff(temp, np.sum(fStar[selected]), wavStar[selected] * 1e-6)
         for temp in temps
     ]
     tstar_b = temps[np.argmin(diffs)]
@@ -469,7 +532,13 @@ def getTstarBright(rootpath, planet, channel, p0_obj):
 def findPhotometry(
     rootpath, planet, channel, mode, pldIgnoreFrames=True, pldAddStack=False
 ):
-    """Calculate the stellar brightness temperature based on phoenix spectrum.
+    """Select dataset-specific aperture, PLD or PSF products and AOR boundaries.
+
+    Aperture ranking uses exact paths in bestPhOption.txt across both naming
+    conventions. PLD/PSF lookup accepts legacy ch1/ch2 names but rejects two
+    copies of the same dataset. PSF centroids use the selected aperture's
+    stack/exclusion settings. Return absolute product directories.
+
     Args:
         rootpath (str): Path to data
         planet   (str): name of the planet
@@ -492,17 +561,12 @@ def findPhotometry(
     AOR_snip = ""
     with open(rootpath + planet + "/analysis/aorSnippet.txt") as f:
         AOR_snip = f.readline().strip()
+    tag = aor_tag(AOR_snip)
+    selected_full_name = channel + "_datacube_full_AORs" + tag + ".dat"
 
     mainpath = rootpath + planet + "/analysis/" + channel + "/"
     ignoreFrames = np.array([])
-    if "psfx" == mode.lower():
-        if channel == "ch2":
-            foldername = "4um"
-        else:
-            foldername = "3um"
-        foldername += "PSF/"
-
-    elif "pld" in mode.lower():
+    if "pld" in mode.lower():
         foldername = mainpath
 
         if pldIgnoreFrames:
@@ -526,12 +590,10 @@ def findPhotometry(
             foldername += "noIgnore/"
         else:
             foldername += "ignore/"
-        if channel == "ch2":
-            foldername += "4um"
-        else:
-            foldername += "3um"
-        foldername += "PLD_"
-        foldername += mode.split("x")[0][-1] + "x" + mode.split("x")[1][0] + "/"
+        suffix = "PLD_" + mode.split("x")[0][-1] + "x" + mode.split("x")[1][0]
+        foldername = resolve_photometry_dir(
+            foldername, channel, suffix, selected_full_name
+        )
 
     else:
         phoption = ""
@@ -539,6 +601,10 @@ def findPhotometry(
         with open(mainpath + "bestPhOption.txt") as f:
             lines = f.readlines()
         for i in range(len(lines)):
+            if lines[i].startswith("/"):
+                candidate = rootpath + lines[i][lines[i].find(planet) :].strip()
+                if not os.path.isfile(os.path.join(candidate, selected_full_name)):
+                    continue  # Another science dataset can have a lower RMS.
             if phoption == "" and lines[i][0] == "/":
                 foldername = rootpath + lines[i][lines[i].find(planet) :].strip() + "/"
                 phoption = lines[i].split("/")[-1].strip()
@@ -571,11 +637,18 @@ def findPhotometry(
                 else:
                     i += 3
 
+        if not phoption:
+            raise ValueError(f"No selected photometry for AOR tag {tag}")
+        if mode.lower() == "psfx":
+            foldername = resolve_photometry_dir(
+                os.path.dirname(foldername.rstrip("/")),
+                channel,
+                "PSF",
+                selected_full_name,
+            )
+
     # path where outputs are saved
     savepath = foldername + mode + "/"
-    if not os.path.exists(savepath):
-        os.makedirs(savepath)
-
     aors = os.listdir(rootpath + planet + "/data/" + channel)
     aors = np.array([aor for aor in aors if AOR_snip == aor[: len(AOR_snip)]])
     firstTime = []
@@ -608,20 +681,13 @@ def findPhotometry(
             firstTime.append(img[0].header["BMJD_OBS"])
     order = np.argsort(firstTime)
     aors = aors[order]
-    AOR_snip = AOR_snip[1:]
+    filename = channel + "_datacube_binned_AORs" + tag + ".dat"
+    filename_full = channel + "_datacube_full_AORs" + tag + ".dat"
+    # Never substitute the generic file: another epoch can overwrite it.
+    breaks = load_aor_breaks(foldername + filename_full, mainpath, AOR_snip, aors)
+    AOR_snip = tag
+    os.makedirs(savepath, exist_ok=True)
 
-    # Figure out where there are AOR breaks
-    breakpath = rootpath + planet + "/analysis/" + channel + "/aorBreaks.txt"
-    with open(breakpath, "r") as file:
-        breaks = file.readline().strip()
-        if len(breaks) == 0:
-            breaks = np.array([])
-        else:
-            breaks = np.array(breaks.split(" ")).astype(float)
-
-    # path to photometry outputs
-    filename = channel + "_datacube_binned_AORs" + AOR_snip + ".dat"
-    filename_full = channel + "_datacube_full_AORs" + AOR_snip + ".dat"
     # Path to previous mcmc results (optional)
     path_params = foldername + mode + "/ResultMCMC_" + mode + "_Params.npy"
 
@@ -937,10 +1003,7 @@ def print_MCMC_results(
             / p0_mcmc[np.where(p0_labels == "rp")[0][0]],
         )
 
-    if channel == "ch1":
-        wav = 3.6 * 1e-6
-    elif channel == "ch2":
-        wav = 4.5 * 1e-6
+    wav = WAVELENGTH_UM[validate_channel(channel)] * 1e-6
     if "fp" in p0_labels:
         fp_MCMC = samples[:, np.where(p0_labels == "fp")[0][0]] * compFactor
     else:

@@ -1,10 +1,12 @@
 import glob
 import hashlib
+import json
 import os
 import pickle
 import warnings
 from functools import partial
 from multiprocessing import get_context
+from pathlib import Path
 
 import numpy as np
 import scipy.interpolate
@@ -15,6 +17,13 @@ from astropy.stats import sigma_clip
 from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
+from .irac import aor_breaks_name, validate_channel, validate_header_channel
+from .irac_timing import (
+    AOR_BOUNDARY_ATOL_DAYS,
+    exposure_midpoints,
+    read_timing,
+    timing_header,
+)
 from .spitzer_products import validate_science_product
 
 warnings.filterwarnings("ignore")
@@ -37,22 +46,36 @@ def _get_pool(processes):
     return context.Pool(processes)
 
 
-def create_folder(fullname, auto=False, overwrite=False):
+def create_folder(fullname, auto=False, overwrite=False, products=()):
     """Create a folder unless it exists.
 
     Args:
         fullname (string): Full path to the folder to be created.
         auto (bool, optional): If the folder already exists, should the folder just be skipped (True)
             or should the user be asked whether they want to overwrite the folder or change the folder name (False, Default).
-        overwrite (bool, optional): Whether you want to overwrite the folder if it already exists
+        overwrite (bool, optional): Reuse a nonempty directory without prompting.
+            No directory contents are removed; product safeguards still apply.
+        products (iterable): Output filenames that must not already exist.
+            Directory reuse may add datasets but cannot replace these files.
+            Corrected siblings are left intact; recursive cleanup protection
+            belongs to assert_reduction_tree(..., recursive=True).
 
     Returns:
         string: The final name used for the folder.
 
     """
 
+    from .timing_correction import assert_reduction_tree
+
     solved = "no"
     while solved == "no":
+        # Recheck the actual destination after any interactive name change.
+        assert_reduction_tree(fullname)
+        for name in products:
+            path = Path(fullname) / name
+            assert_reduction_tree(path)
+            if path.exists() or path.is_symlink():
+                raise FileExistsError(f"Photometry already exists: {path}")
         if not os.path.exists(fullname):
             # Folder doesn't exist yet and can be safely written to
             os.makedirs(fullname)
@@ -101,7 +124,7 @@ def get_fnames(directory, AOR_snip, science_product="bcd"):
     validate_science_product(science_product)
     while directory[-1] == "/":
         directory = directory[:-1]
-    ch = directory.split("/")[-1]
+    ch = validate_channel(directory.split("/")[-1])
 
     lst = os.listdir(directory)
     AOR_list = sorted(folder for folder in lst if AOR_snip == folder[: len(AOR_snip)])
@@ -177,34 +200,32 @@ def get_stacks(calDir, dataDir, AOR_snip, science_product="bcd"):
     return np.array(calFiles)
 
 
-def get_time(header, ignoreFrames):
-    """Gets the time stamp for each image.
+def get_time(
+    header, ignoreFrames=None, time_scale="tdb", target_coord=None, time_format="bmjd"
+):
+    """Return known exposure midpoints, including rejected measurements.
 
-    Args:
-        header (astropy.io.fits.header.Header): Header of fits file.
-        ignoreFrames (ndarray): Array of frames to ignore (consistently bad frames).
-
-    Returns:
-        ndarray: Updated time stamp array.
-
+    ``ignoreFrames`` rejects image/flux measurements, not their acquisition
+    times. Keeping finite times preserves cube positions and chronological
+    sorting. The old fancy-index mask assignment did not mask the original
+    array either. BMJD_TDB is the default; UTC requires an explicit option.
+    See :mod:`SPCA.irac_timing` for the scientific convention and limitations.
     """
-
-    if header["NAXIS"] == 2:
-        h = 1
-    else:
-        h = header["NAXIS3"]
-    sec2day = 1.0 / (3600.0 * 24.0)
-    step = header["FRAMTIME"] * sec2day
-    t = np.linspace(
-        header["BMJD_OBS"] + step / 2,
-        header["BMJD_OBS"] + (h - 1) * step,
-        h,
-        endpoint=True,
+    values = exposure_midpoints(
+        header,
+        time_scale=time_scale,
+        target_coord=target_coord,
+        time_format=time_format,
     )
-    t = np.ma.masked_invalid(t)
-    if ignoreFrames != []:
-        t[ignoreFrames].mask = True
-    return t
+    if ignoreFrames is not None and len(ignoreFrames):
+        indices = np.asarray(ignoreFrames)
+        if (
+            indices.dtype.kind not in "iu"
+            or np.any(indices < 0)
+            or np.any(indices >= len(values))
+        ):
+            raise ValueError("ignoreFrames must contain valid integer cube positions")
+    return np.ma.array(values, mask=False)
 
 
 def oversampling(image_data, scale=2):
@@ -392,7 +413,11 @@ def bgsubtract(bounds=(11, 19, 11, 19), i=0):
 
 
 def bin_array(data, size):
-    """Median bin an array.
+    """Return sample medians and population scatter in consecutive row bins.
+
+    Masked/nonfinite values are excluded; empty bins remain NaN and the final
+    partial bin is retained. Bins follow sorted rows and may cross AOR gaps.
+    Scatter is not a propagated uncertainty on the median.
 
     Args:
         data (1D array): Array of data to be binned.
@@ -422,6 +447,39 @@ def bin_array(data, size):
     return binned_data, binned_data_std
 
 
+def bin_timestamps(time, flux, size):
+    """Represent each median-flux bin by its contributing samples' median time.
+
+    Use the post-clipping flux mask, including nonfinite fluxes. A median has
+    no fixed linear weights, so this is a representative sampling time, not an
+    exact effective time for a varying signal. Return population time scatter
+    in the input units (days for SPCA products). If any contributing exposure
+    lacks a timestamp, both time statistics are NaN; never change flux or bin
+    membership to conceal missing timing. Binned-level rejection removes the
+    whole flux measurement, without recomputing these sampling statistics.
+    PLD vectors may be passed as (exposure, pixel). A bin has a common time
+    only when all pixel medians use the same exposure mask; otherwise its
+    timestamp/scatter remain NaN while its pixel measurements are preserved.
+    """
+    time = np.ma.masked_invalid(np.ma.asarray(time, dtype=float))
+    flux = np.ma.masked_invalid(np.ma.asarray(flux, dtype=float))
+    if time.ndim != 1 or flux.ndim not in (1, 2) or len(time) != len(flux):
+        raise ValueError("Time and flux must have matching exposure rows")
+    rejected = np.ma.getmaskarray(flux)
+    if flux.ndim == 2:
+        contributing = ~rejected.all(axis=1)
+        ambiguous = rejected.any(axis=1) & contributing
+    else:
+        contributing = ~rejected
+        ambiguous = np.zeros(len(time), dtype=bool)
+    median, scatter = bin_array(np.ma.array(time, mask=~contributing), size)
+    missing = (contributing & np.ma.getmaskarray(time)) | ambiguous
+    for i, start in enumerate(range(0, len(time), int(size))):
+        if missing[start : start + int(size)].any():
+            median[i] = scatter[i] = np.nan
+    return median, scatter
+
+
 def highpassflist(signal, highpassWidth):
     g = Box1DKernel(highpassWidth)
     signal = np.ma.array(signal, dtype=float).filled(np.nan)
@@ -440,7 +498,7 @@ def oversample_cache_name(fname, image, scale):
     The name combines the image's full archive filename stem (AOR, exposure,
     pipeline version, and BCD/CBCD version), the oversampling ``scale``, and a
     SHA-256 digest of the prepared image that is about to be oversampled, e.g.
-    ``SPITZER_I1_28578560_0002_6_C7915448_bcd_x2_<digest>.pkl``. The image is
+    ``SPITZER_I1_<AORKEY>_<EXPID>_6_C<ensemble>_bcd_x2_<digest>.pkl``. The image is
     hashed after correction stacks, ignored frames, sigma clipping, unit
     conversion, and star masking, so any change to those inputs or settings
     selects a different cache instead of reusing a stale one. Older caches
@@ -473,6 +531,9 @@ def _load_oversample_cache(savename, expected_shape):
 
 def _save_oversample_cache(image, savename):
     """Atomically write a cache so interrupted writes never leave a partial file."""
+    from .timing_correction import assert_reduction_tree
+
+    assert_reduction_tree(savename)
     os.makedirs(os.path.dirname(savename) or ".", exist_ok=True)
     temporary = f"{savename}.{os.getpid()}.tmp"
     try:
@@ -550,6 +611,9 @@ def prepare_image(
     i=0,
     target_coord=None,
     aor_crops=None,
+    time_scale="tdb",
+    channel=None,
+    time_format="bmjd",
 ):
 
     # Index of the AOR containing image i (lens counts files, not frames).
@@ -558,12 +622,23 @@ def prepare_image(
     # open fits file
     with fits.open(fnames[i]) as hdu_list:
         header = hdu_list[0].header
+        if channel is not None:
+            validate_header_channel(header, channel)
+        shape = hdu_list[0].data.shape
+        if shape != (256, 256) and not (len(shape) == 3 and shape[1:] == (32, 32)):
+            raise ValueError(f"Unsupported IRAC BCD geometry: {shape}")
         full_frame = hdu_list[0].data.ndim == 2
         if full_frame and len(ignoreFrames):
             raise ValueError(
                 "ignoreFrames selects subarray cube positions; use [] for full-frame data"
             )
-        time = get_time(header, ignoreFrames)
+        time = get_time(
+            header,
+            ignoreFrames,
+            time_scale=time_scale,
+            target_coord=target_coord,
+            time_format=time_format,
+        )
 
         if full_frame:
             if aor_crops is None:
@@ -624,18 +699,11 @@ def prepare_image(
             x, y = np.rint(skycoord_to_pixel(coord, w)).astype(int)
             if full_frame:
                 x, y = x - crop[1].start, y - crop[0].start
-                # Clip the mask footprint to the stamp; don't wrap negative indices.
-                if -1 <= x <= 32 and -1 <= y <= 32:
-                    mask[
-                        :,
-                        max(0, y - 1) : min(32, y + 2),
-                        max(0, x - 1) : min(32, x + 2),
-                    ] = True
-                continue
-            x = x + np.arange(-1, 2)
-            y = y + np.arange(-1, 2)
-            x, y = np.meshgrid(x, y)
-            mask[:, x, y] = True
+            # WCS uses (x,y); arrays use (y,x), for every IRAC channel.
+            if -1 <= x <= 32 and -1 <= y <= 32:
+                mask[
+                    :, max(0, y - 1) : min(32, y + 2), max(0, x - 1) : min(32, x + 2)
+                ] = True
         image = np.ma.masked_array(image, mask=mask)
 
     # oversampling
@@ -679,6 +747,9 @@ def prepare_images(
     ncpu=4,
     science_product="bcd",
     target_coord=None,
+    time_scale="tdb",
+    background_bounds=(11, 19, 11, 19),
+    time_format="bmjd",
 ):
     """Prepare exactly one science-image version for photometry.
 
@@ -687,8 +758,23 @@ def prepare_images(
     sky-dark filenames for the same selected AORs. Full-frame images require
     ``target_coord`` (scalar SkyCoord or RA/Dec in degrees). Each AOR uses its
     first selected image's WCS to choose one fixed 32x32 crop for all exposures.
-    Subarray images ignore target_coord and retain their original stamp.
+    Subarrays retain their stamp; target_coord also selects the timing direction.
+    Arbitrary positive cube lengths are accepted; frame-position diagnostics
+    separately require 64 frames. Geometry/channel validation and GAIN*EXPTIME/
+    FLUXCONV conversion are shared by aperture, PSF and PLD, but do not establish
+    scientific validation of every method/channel combination. Source/background
+    windows are not automatically calibrated per detector. Uncertainty/mask
+    companion files are not consumed. Keep oversamp=False (see oversampling).
     """
+
+    validate_channel(channel)
+    from .timing_correction import assert_reduction_tree
+
+    if len(background_bounds) != 4 or not (
+        0 <= background_bounds[0] < background_bounds[1] <= 32
+        and 0 <= background_bounds[2] < background_bounds[3] <= 32
+    ):
+        raise ValueError("background_bounds must enclose a box within the stamp")
 
     # folder containing properly named correction stacks (will be automatically selected)
     stackPath = basepath + "Calibration/"
@@ -718,20 +804,6 @@ def prepare_images(
             "ignoreFrames selects subarray cube positions; use [] for full-frame data"
         )
 
-    # get path where the aor breaks will be saved
-    breakpath = basepath + planet + "/analysis/" + channel + "/aorBreaks.txt"
-    # get & write aor breaks
-    index = 0
-    breaktimes = []
-    for length in lens:
-        with fits.open(fnames[index]) as rawImage:
-            header = rawImage[0].header
-            breaktimes.append(get_time(header, []).flatten()[0])
-        index += length
-    breaktimes = np.sort(breaktimes)[1:]
-    with open(breakpath, "w") as f:
-        f.write(str(breaktimes)[1:-1])
-
     # if need to add correction stack
     if addStack:
         stacks = get_stacks(stackPath, datapath, AOR_snip, science_product)
@@ -756,9 +828,88 @@ def prepare_images(
             stackPath,
             maskStars,
             aor_crops=crops,
+            target_coord=target_coord,
+            time_format=time_format,
+            time_scale=time_scale,
+            channel=channel,
         )
         inds = range(len(fnames))
-        results = np.ma.concatenate(pool.map(func, inds), axis=0)
+        loaded = pool.map(func, inds)
+    # Use the earliest actual timestamp in each AOR, not filename order.
+    # Keeping the individual results until here also avoids rereading headers.
+    first, aor_starts = 0, {}
+    for length in lens:
+        aor = Path(fnames[first]).parents[2].name
+        aor_starts[aor] = float(
+            min(np.min(block[:, -1]) for block in loaded[first : first + length])
+        )
+        first += length
+    breaktimes = sorted(aor_starts.values())[1:]
+    # Record actual directions, including when no target was supplied. Reading
+    # headers here adds no image-data read and keeps the worker array API stable.
+    directions = set()
+    for fname in fnames:
+        header = fits.getheader(fname)
+        directions.add((header.get("RA_RQST"), header.get("DEC_RQST")))
+    declaration = timing_header(
+        time_scale,
+        target_coord,
+        time_format,
+        aor_starts=aor_starts,
+        header_reference_directions_deg=sorted(directions, key=str),
+        source_bcds=fnames,
+    )
+    breakpath = basepath + planet + "/analysis/" + channel + "/aorBreaks.txt"
+    selected_breakpath = str(Path(breakpath).parent / aor_breaks_name(AOR_snip))
+    # Preparation writes only these boundaries and optional cache entries.
+    # Corrected products for other datasets in this channel are read-only
+    # siblings, not a reason to block this selection.
+    assert_reduction_tree(breakpath)
+    if not Path(selected_breakpath).exists():
+        assert_reduction_tree(selected_breakpath)
+    # Different directory prefixes share this dataset-specific sidecar. Reuse
+    # compatible metadata verbatim; changing its time basis would invalidate
+    # existing photometry even when the new tables have different names.
+    if Path(selected_breakpath).exists():
+        existing = read_timing(selected_breakpath)
+        expected = json.loads(declaration.split("SPCA_TIMING_JSON=", 1)[1])
+        keys = (
+            "version",
+            "format",
+            "scale",
+            "barycentric",
+            "target_icrs_deg",
+            "aor_starts",
+        )
+        if any(existing.get(key) != expected[key] for key in keys):
+            raise FileExistsError(
+                f"Dataset-specific AOR timing already exists: {selected_breakpath}; "
+                "use a separate analysis directory"
+            )
+        payload = [
+            line
+            for line in Path(selected_breakpath).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        values = np.loadtxt(payload, ndmin=1) if payload else np.array([])
+        # Match the model loader's absolute tolerance: 2e-10 days (~17 us)
+        # permits float/text rounding while resolving millisecond corruption.
+        # Zero relative tolerance is essential for absolute JD/MJD values.
+        if values.shape != (len(breaktimes),) or not np.allclose(
+            values, breaktimes, rtol=0, atol=AOR_BOUNDARY_ATOL_DAYS
+        ):
+            raise ValueError(
+                f"Invalid dataset-specific AOR boundaries: {selected_breakpath}"
+            )
+    os.makedirs(os.path.dirname(breakpath), exist_ok=True)
+    for destination in (breakpath, selected_breakpath):
+        if destination == selected_breakpath and Path(destination).exists():
+            continue
+        with open(destination, "w") as stream:
+            stream.write("# " + declaration.replace("\n", "\n# ") + "\n")
+            stream.write(" ".join(f"{value:.15f}" for value in breaktimes) + "\n")
+    results = np.ma.concatenate(loaded, axis=0)
+    del loaded
 
     # Access global variable
     global image_stack
@@ -769,7 +920,7 @@ def prepare_images(
     results = None
 
     # Sort data into correct order
-    order = np.argsort(time)
+    order = np.argsort(np.ma.getdata(time), kind="stable")
     time = time[order]
     image_stack = image_stack[order]
     # Free up a bit of RAM
@@ -782,7 +933,7 @@ def prepare_images(
     print("Subtracting background... ", end="", flush=True)
     # background subtraction is done on global variable
     with _get_pool(ncpu) as pool:
-        func = partial(bgsubtract, (11, 19, 11, 19))
+        func = partial(bgsubtract, tuple(background_bounds))
         inds = range(image_stack.shape[0])
         bg, bg_err = np.array(pool.map(func, inds)).T
 

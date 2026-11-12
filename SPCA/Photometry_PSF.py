@@ -17,10 +17,13 @@ from photutils.utils import calc_total_error
 from scipy import optimize
 from tqdm import tqdm
 
+from .irac import aor_tag, aperture_prefix
+from .irac_timing import timing_header, validate_preloaded_time
 from .make_plots import plot_photometry
 from .Photometry_Common import (
     _get_pool,
     bin_array,
+    bin_timestamps,
     clip_data,
     create_folder,
     prepare_images,
@@ -55,7 +58,7 @@ def update(outputs):
 # Get the center by fitting a 2D gaussian
 def gaussian(height, center_x, center_y, width_x, width_y, x, y):
     # Using code based on that from https://scipy-cookbook.readthedocs.io/items/FittingData.html
-    """Returns a gaussian function with the given parameters"""
+    """Normalized Gaussian; ``height`` is the integrated model-flux coefficient."""
     return (
         height
         / (2 * np.pi * width_x * width_y)
@@ -110,7 +113,10 @@ def fit_2DGaussian(
     defaultPSFW=["median", "median"],
     ncpu=4,
 ):
-    """Gets the centroid of the target by flux weighted mean and the PSF width of the target.
+    """Fit a normalized 2D Gaussian: model flux, centroid and Gaussian widths.
+
+    This is an analytic Gaussian fit, not a calibrated instrumental PSF model.
+    The returned flux is its integrated model coefficient in image-count units.
 
     Args:
         image_data (ndarray): Data cube of images (2D arrays of pixel values).
@@ -123,8 +129,8 @@ def fit_2DGaussian(
             Default is median of widths.
 
     Returns:
-        tuple: xo, yo, wx, wy (list, list, list, list). The updated lists of x-centroid, y-centroid,
-            PSF width (x-axis), and PSF width (y-axis).
+        tuple: flux, xo, yo, xw, yw arrays. Widths are Gaussian sigmas; flux is
+            the coefficient of the normalized Gaussian.
     """
 
     lbx, ubx, lby, uby = bounds
@@ -185,8 +191,25 @@ def get_lightcurve(
     bg_err=None,
     time=None,
     science_product="bcd",
+    target_coord=None,
+    time_scale="tdb",
+    time_format="bmjd",
+    input_time_metadata=None,
 ):
     """Given a directory, looks for data (bcd.fits files), opens them and performs PSF photometry.
+
+    Times default to BMJD_TDB. Use time_format="bjd" explicitly for BJD_TDB,
+    or time_scale="utc" for legacy-scale output. target_coord selects the
+    timing direction for both geometries and the full-frame WCS crop.
+    Preloaded arrays require a matching input_time_metadata declaration.
+
+    Native 32x32 stamps can come from subarrays or full-frame WCS crops, for
+    ch1-ch4. The high-level fit fixes scale=1 and bounds=(13,18,13,18);
+    broad PSFs/drift need scientific assessment. Keep oversamp=False: common
+    interpolation is nonfunctional and this fit does not propagate its scale.
+    Synthetic native-pixel outputs are checked; recent real ch3/ch4 validation
+    covered aperture extraction, not this method's science performance.
+    Full/binned outputs have 7/14 columns, with empirical binned scatter.
 
     Args:
         science_product (str): Select 'bcd' (default) or 'cbcd' when loading images.
@@ -221,8 +244,8 @@ def get_lightcurve(
         basepath += "/"
 
     # prepare filenames for saved data
-    save_full = channel + "_datacube_full_AORs" + AOR_snip[1:] + ".dat"
-    save_bin = channel + "_datacube_binned_AORs" + AOR_snip[1:] + ".dat"
+    save_full = channel + "_datacube_full_AORs" + aor_tag(AOR_snip) + ".dat"
+    save_bin = channel + "_datacube_binned_AORs" + aor_tag(AOR_snip) + ".dat"
 
     # Access the global variable
     global image_stack
@@ -242,8 +265,14 @@ def get_lightcurve(
             maskStars,
             ncpu,
             science_product=science_product,
+            target_coord=target_coord,
+            time_scale=time_scale,
+            time_format=time_format,
         )
     else:
+        validate_preloaded_time(
+            input_time_metadata, time_scale, target_coord, time_format
+        )
         image_stack = image_stack_input
 
     bg = clip_data(bg, highpassWidth, sigma1=10, sigma2=5, maxiters=3)
@@ -269,7 +298,7 @@ def get_lightcurve(
 
     if bin_data:
         binned_flux, binned_flux_std = bin_array(flux, bin_size)
-        binned_time, binned_time_std = bin_array(time, bin_size)
+        binned_time, binned_time_std = bin_timestamps(time, flux, bin_size)
         binned_xo, binned_xo_std = bin_array(xo, bin_size)
         binned_yo, binned_yo_std = bin_array(yo, bin_size)
         binned_xw, binned_xw_std = bin_array(xw, bin_size)
@@ -284,10 +313,7 @@ def get_lightcurve(
     if save or savePlots:
         print("\tSaving... ", end="", flush=True)
         # create save folder
-        if channel == "ch1":
-            folder = "3um"
-        else:
-            folder = "4um"
+        folder = aperture_prefix(channel)
         folder += "PSF/"
 
         savepath = basepath + planet + "/analysis/" + channel + "/"
@@ -302,7 +328,12 @@ def get_lightcurve(
 
         savepath = savepath + folder
 
-        savepath = create_folder(savepath, True, True)
+        savepath = create_folder(
+            savepath,
+            True,
+            True,
+            products=(save_full, save_bin) if save else (),
+        )
 
     if savePlots or showPlots:
         if bin_data:
@@ -339,7 +370,7 @@ def get_lightcurve(
         axes[4].set_ylabel("$y_w$")
 
         fig.subplots_adjust(hspace=0)
-        axes[4].set_xlabel("Time (BMJD))")
+        axes[4].set_xlabel(f"Time ({time_format.upper()}_{time_scale.upper()})")
         axes[4].ticklabel_format(useOffset=False)
 
         if savePlots:
@@ -357,7 +388,20 @@ def get_lightcurve(
             "Flux, Time, x-centroid, y-centroid, x-PSF width, y-PSF width, bg flux"
         )
         pathFULL = savepath + save_full
-        np.savetxt(pathFULL, FULL_data, header=FULL_head)
+        np.savetxt(
+            pathFULL,
+            FULL_data,
+            header=FULL_head
+            + "\n"
+            + timing_header(
+                time_scale,
+                target_coord,
+                time_format,
+                bin_size=bin_size,
+                binning="median of timestamps of surviving flux samples",
+                flux_preprocessing="neighbor-median imputation during clipping",
+            ),
+        )
         if bin_data:
             BIN_data = np.c_[
                 binned_flux,
@@ -378,7 +422,20 @@ def get_lightcurve(
             BIN_head = "Flux, Flux std, Time, Time std, x-centroid, x-centroid std, y-centroid, y-centroid std"
             BIN_head += ", x-PSF width, x-PSF width std, y-PSF width, y-PSF width std, bg flux, bg flux std"
             pathBIN = savepath + save_bin
-            np.savetxt(pathBIN, BIN_data, header=BIN_head)
+            np.savetxt(
+                pathBIN,
+                BIN_data,
+                header=BIN_head
+                + "\n"
+                + timing_header(
+                    time_scale,
+                    target_coord,
+                    time_format,
+                    bin_size=bin_size,
+                    binning="median of timestamps of surviving flux samples",
+                    flux_preprocessing="neighbor-median imputation during clipping",
+                ),
+            )
 
     print("Done.", flush=True)
 
